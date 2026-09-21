@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Bases, CellState, Econ, Game, blastRange, blastRadius, cellKey, forEachNeighbor, inBlast, isRevealed, keyX, keyY, makeConfig, manhattan, numberOf, revealedState } from '../src';
 
 function game(seed = 3, strict = false): Game {
-  const g = new Game({ seed, world: { uniformDensity: 0.2, riverEnabled: false }, resolve: { interventionMode: strict ? 'STRICT' : 'FAIR' } } as never);
+  const g = new Game({ seed, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: 0.2, terrainEnabled: false }, resolve: { interventionMode: strict ? 'STRICT' : 'FAIR' } } as never);
   g.reveal(0, 0);
   g.econ.credits = 1e12;
   return g;
@@ -156,7 +156,7 @@ describe('bases', () => {
     expect(b.complexOf.get(cellKey(1, 0))).toBe(cellKey(0, 0));
     expect(b.route(cellKey(1, 0))).toBe(0);
     const c0 = econ.credits;
-    b.tick(1);
+    b.turn();
     expect(econ.credits - c0).toBeCloseTo(2);
     expect(b.shipments.length).toBe(0);
   });
@@ -171,27 +171,58 @@ describe('bases', () => {
     expect([...g.bases.edges()]).toEqual(edges);
   });
 
-  it('base production reaches credits only after travelling to the main base', () => {
+  it('every tile-changing action is one turn: all linked bases pay at once; time, lifting a flag and "?" pay nothing', () => {
     const g = game(5);
     expect(ownMines(g, 20).length).toBeGreaterThan(5);
     const b = g.bases;
-    const far = Math.max(...[...g.econ.owned.keys()].map((k) => b.route(k)));
-    let instant = 0;
-    for (const k of b.complexes.get(b.main!)!.members) instant += b.rates.get(k) ?? 0;
-    const start = g.econ.credits;
-    const step = 0.1;
-    g.tick(step);
-    // The main complex pays at once; other bases have not arrived yet.
-    expect(g.econ.credits - start).toBeCloseTo(instant * step);
-    const settle = b.cfg.shipInterval + far / b.speed() + 1;
-    for (let t = 0; t < settle; t += step) g.tick(step);
-    const before = g.econ.credits + b.inTransit();
-    for (let i = 0; i < 200; i++) g.tick(step);
-    // Steady state: everything produced is either credited or still on its way
-    // (relative check: the fixture holds 1e12 credits).
-    const want = g.econ.incomeRate * 200 * step;
-    expect(Math.abs(g.econ.credits + b.inTransit() - before - want) / want).toBeLessThan(1e-4);
-    expect(b.shipments.length).toBeGreaterThan(0);
+    const rate = g.econ.incomeRate;
+    expect(rate).toBeGreaterThan(0);
+    let start = g.econ.credits;
+    for (let i = 0; i < 50; i++) g.tick(0.1);
+    // Time alone produces nothing; shipments are only a picture.
+    expect(g.econ.credits).toBe(start);
+    // A flag is not a turn.
+    const pick = (ok: (x: number, y: number) => boolean): [number, number] => {
+      let at: [number, number] | null = null;
+      // Unknown cells on the frontier (forEachCell skips Unknown).
+      g.board.forEachCell((x, y, s) => {
+        if (at || !isRevealed(s)) return;
+        forEachNeighbor(x, y, (nx, ny) => void (!at && g.cellState(nx, ny) === CellState.Unknown && ok(nx, ny) && (at = [nx, ny])));
+      });
+      return at!;
+    };
+    const [fx, fy] = pick(() => true);
+    // Placing a flag is a turn (the network treats a flag like Unknown, so the rate holds).
+    g.toggleFlag(fx, fy);
+    expect(g.econ.credits - start).toBeCloseTo(rate, 2);
+    // Flag -> "?" -> Unknown and lifting a flag are not.
+    start = g.econ.credits;
+    g.cycleMark(fx, fy);
+    g.cycleMark(fx, fy);
+    expect(g.questioned(fx, fy)).toBe(false);
+    expect(g.econ.credits).toBe(start);
+    g.toggleFlag(fx, fy);
+    start = g.econ.credits;
+    g.toggleFlag(fx, fy);
+    expect(g.econ.credits).toBe(start);
+    // A chord that opens nothing is not a turn either.
+    const nums: Array<[number, number]> = [];
+    g.board.forEachCell((x, y, s) => void (isRevealed(s) && numberOf(s) > 0 && nums.push([x, y])));
+    for (const [nx, ny] of nums) {
+      const r = g.chord(nx, ny);
+      if (r.revealed || r.hit) break;
+      expect(g.econ.credits).toBe(start);
+    }
+    // One reveal (whatever it cascades into) is one turn.
+    const [sx, sy] = pick((x, y) => g.world.truth(x, y) === 0);
+    start = g.econ.credits;
+    const produced = [...g.econ.owned.values()].reduce((a, m) => a + (m.produced ?? 0), 0);
+    g.reveal(sx, sy);
+    // Paid with the network as it stood before the reveal. The fixture holds 1e12 credits: compare loosely.
+    expect(g.econ.credits - start).toBeCloseTo(rate, 2);
+    expect([...g.econ.owned.values()].reduce((a, m) => a + (m.produced ?? 0), 0) - produced).toBeCloseTo(rate, 6);
+    // Producing complexes away from the main one send a (cosmetic) shipment.
+    if ([...b.complexes.values()].some((c) => c.hub !== b.main && c.rate > 0)) expect(b.shipments.length).toBeGreaterThan(0);
   });
 
   it('upgrading the main base raises income, costs credits, and survives a save', () => {
@@ -210,39 +241,34 @@ describe('bases', () => {
     const back = Game.fromSave(structuredClone(g.toSave()));
     expect(back.bases.mainLevel).toBe(3);
     expect(back.econ.incomeRate).toBeCloseTo(g.econ.incomeRate);
-    // Undelivered goods are credited on load.
-    expect(back.econ.credits).toBeCloseTo(g.econ.credits + g.bases.inTransit());
+    expect(back.econ.credits).toBeCloseTo(g.econ.credits);
   });
 
   it('no main base (and no upgrade) before the first cell is opened', () => {
-    const g = new Game({ seed: 1 } as never);
+    const g = new Game({ seed: 1, fog: { enabled: false }, tiers: { enabled: false } } as never);
     g.econ.credits = 1e9;
     expect(g.bases.main).toBeNull();
     expect(g.upgradeMainBase().reason).toBe('nobase');
   });
 
-  it('transport speed and streak cap upgrades apply and survive a save', () => {
+  it('the streak cap upgrade applies and survives a save; transport speed is gone', () => {
     const g = game();
-    const v0 = g.bases.speed();
-    expect(g.buy('transport_speed').ok).toBe(true);
-    expect(g.bases.speed()).toBeCloseTo(v0 + g.cfg.bases.transportSpeedPerLevel);
+    expect(() => g.buy('transport_speed')).toThrow();
     const cap0 = g.econ.cfg.streakMultCap + g.econ.streakCapBonus;
     expect(g.buy('streak_cap').ok).toBe(true);
     expect(g.econ.cfg.streakMultCap + g.econ.streakCapBonus).toBeCloseTo(cap0 + g.cfg.econ.streakCapPerLevel);
     const back = Game.fromSave(structuredClone(g.toSave()));
-    expect(back.bases.speed()).toBeCloseTo(g.bases.speed());
     expect(back.econ.streakCapBonus).toBeCloseTo(g.econ.streakCapBonus);
   });
 });
 
 describe('blasts', () => {
-  it('radius range: the minimum and the maximum rise in turn every 5 tiles from the main base', () => {
+  it('radius range follows the mining tier (the last entry covers higher tiers)', () => {
     const cfg = makeConfig({} as never).blast;
-    const ranges = [0, 5, 10, 15, 20, 26].map((d) => blastRange(cfg, d)).map((r) => [r.min, r.max]);
-    expect(ranges).toEqual([[3, 5], [4, 5], [4, 6], [5, 6], [5, 7], [6, 7]]);
-    expect(blastRange(cfg, 4.9).band).toBe(0);
+    const ranges = [1, 3, 5, 6].map((t) => blastRange(cfg, t)).map((r) => [r.min, r.max]);
+    expect(ranges).toEqual([[3, 5], [4, 6], [5, 7], [5, 7]]);
     for (let n = 0; n < 50; n++) {
-      const r = blastRadius(cfg, 12, 7, n, -n, n);
+      const r = blastRadius(cfg, 3, 7, n, -n, n);
       expect(r).toBeGreaterThanOrEqual(4);
       expect(r).toBeLessThanOrEqual(6);
     }

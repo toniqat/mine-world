@@ -3,6 +3,7 @@ export * from './key';
 export * from './hash';
 export * from './world';
 export * from './board';
+export * from './fog';
 export * from './csp';
 export * from './solver';
 export * from './resolve';

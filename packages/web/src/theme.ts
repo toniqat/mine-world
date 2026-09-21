@@ -23,6 +23,13 @@ export interface Palette {
   cellGrid: number;
   cellOwned: number;
   cellLost: number;
+  /** Terrain walls (no tile): mountains and rivers. */
+  cellMountain: number;
+  cellWater: number;
+  /** Fog of war: unseen cells (walls included) all look the same: a faint tile with a dashed outline in this colour. */
+  cellFog: number;
+  /** Tiles in a mining tier whose technology is not learned yet (drawn with a padlock); unlocked tiles use cellUnknown. */
+  cellLocked: number;
   /** Single colour for all neighbour counts. */
   digit: number;
   probLow: number;
@@ -47,6 +54,10 @@ export const PALETTES: Record<ThemeName, Palette> = {
     cellGrid: 0x1f1f1f,
     cellOwned: 0x0078d4,
     cellLost: 0x4d4d4d,
+    cellMountain: 0x3a3226,
+    cellWater: 0x1d3347,
+    cellFog: 0x6e6e6e,
+    cellLocked: 0x3a3550,
     digit: 0xcccccc,
     probLow: 0x89d185,
     probHigh: 0xf14c4c,
@@ -68,6 +79,10 @@ export const PALETTES: Record<ThemeName, Palette> = {
     cellGrid: 0xeeeeee,
     cellOwned: 0x005fb8,
     cellLost: 0xb0b0b0,
+    cellMountain: 0xc9b99a,
+    cellWater: 0xa9cbe6,
+    cellFog: 0x9a9a9a,
+    cellLocked: 0xd4cce8,
     digit: 0x3b3b3b,
     probLow: 0x388a34,
     probHigh: 0xe51400,

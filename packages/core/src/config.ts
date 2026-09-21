@@ -22,12 +22,33 @@ export interface WorldConfig {
   /** Density added per cell of distance from the origin (0 disables). Capped by distanceRampCap. */
   distanceRamp: number;
   distanceRampCap: number;
-  /** Linear structures (§3.3): bands of near-certain mines. */
-  riverEnabled: boolean;
+  /**
+   * Terrain walls (mountains, rivers): cells with no tile, no mine and no number.
+   * They act like the edge of a finite board, so ambiguities pinned against them
+   * cannot be bypassed and have to be guessed (the reverse of spec §1 claim 3).
+   */
+  terrainEnabled: boolean;
+  /** No wall within this distance of the start cell (and none before the start is set). */
+  terrainMinRadius: number;
+  /** Mountains: blobs where fBm(mountainNoiseScale) exceeds mountainThreshold. */
+  mountainNoiseScale: number;
+  mountainThreshold: number;
+  /** Rivers: bands where |fBm(riverNoiseScale) - 0.5| < riverWidth ... */
   riverNoiseScale: number;
   riverWidth: number;
-  riverDensity: number;
-  riverMinRadius: number;
+  /** ... broken by fords where fBm(fordNoiseScale) < fordThreshold, so rivers never enclose an area. */
+  fordNoiseScale: number;
+  fordThreshold: number;
+  /** Legacy (saves from before terrain): rivers were bands of near-certain mines. Only set by old saves. */
+  riverEnabled?: boolean;
+  riverMinRadius?: number;
+  riverDensity?: number;
+  /**
+   * Noise and hashes are read relative to the start cell, so the map around the
+   * main base does not depend on where it was placed (placing it is just
+   * "start"). Absent (false) in saves from before, which keep absolute maps.
+   */
+  startRelative?: boolean;
   /** When set, every cell (outside the start radius) has this density. Used by sim/tests. */
   uniformDensity: number | null;
   /** Max relative density boost used to repay density debt (§5.3). */
@@ -60,8 +81,8 @@ export interface EconConfig {
   densityDoubling: number;
   /** One-time payout on settlement = sum(mineValue) * this * streakMult. */
   settlementPayoutMult: number;
-  /** Passive income per second per owned mine = mineValue * this. */
-  incomePerSecondMult: number;
+  /** Passive income per turn (one tile-changing player action) per owned mine = mineValue * this. */
+  incomePerTurnMult: number;
   /** Streak multiplier grows by this per safe player click, capped at streakMultCap. */
   streakMultPerClick: number;
   streakMultCap: number;
@@ -91,12 +112,8 @@ export interface DroneConfig {
 
 /** Bases (Owned mines + the main base at the start cell), see econ/bases.ts. */
 export interface BaseConfig {
-  /** Speed of shipments along the base network (tiles per second), before the transport upgrade. */
+  /** Speed of the (cosmetic) shipment animation along the base network, tiles per second. */
   transportTilesPerSec: number;
-  /** Tiles per second added per level of the `transport_speed` upgrade. */
-  transportSpeedPerLevel: number;
-  /** Each base ships its stock towards the main base this often (seconds). */
-  shipInterval: number;
   /** All base production x growth^(level - 1). The main base itself produces nothing. */
   levelProdGrowth: number;
   mainCostBase: number;
@@ -110,11 +127,8 @@ export interface BaseConfig {
 
 /** Mine explosions disabling bases, and repairing them (see econ/blast.ts). */
 export interface BlastConfig {
-  /** Distance bands from the main base (tiles, Euclidean). */
-  bandTiles: number;
-  /** Radius range in band 0; later bands raise the minimum and the maximum in turn (3-5, 4-5, 4-6, 5-6, ...). */
-  minRadius: number;
-  maxRadius: number;
+  /** Blast radius range [min, max] per mining tier (index 0 = tier 1); the last entry covers higher tiers. */
+  radiusByTier: Array<[number, number]>;
   /** Repair cost = repairCostBase + repairCostPerTile x opened cells. */
   repairCostBase: number;
   repairCostPerTile: number;
@@ -127,6 +141,30 @@ export interface PlayConfig {
   cascadeCap: number;
 }
 
+/** Fog of war (see fog.ts): vision around the main base, bases and opened cells. Radii never grow. */
+export interface FogConfig {
+  enabled: boolean;
+  /** Disc the main base sees. */
+  mainRadius: number;
+  /** Disc every base (Owned mine) sees. */
+  baseRadius: number;
+  /** Every opened cell lifts the fog this many tiles around it (Chebyshev square). */
+  openedRadius: number;
+}
+
+/**
+ * Mining tiers (tech tree): rings around the main base. Tier 1 can always be
+ * mined; tier n needs the `mining` technology at level n - 1. Cells of a locked tier
+ * cannot be opened, flagged or chorded into, and cascades stop at them.
+ */
+export interface TierConfig {
+  enabled: boolean;
+  /** Distance (tiles, Euclidean from the main base) at which tier 2, 3, ... begin. */
+  radii: number[];
+  /** Mine value (settlement payout and production) multiplier per tier (index 0 = tier 1). */
+  valueMult: number[];
+}
+
 export interface GameConfig {
   seed: number;
   play: PlayConfig;
@@ -137,6 +175,8 @@ export interface GameConfig {
   drones: DroneConfig;
   bases: BaseConfig;
   blast: BlastConfig;
+  fog: FogConfig;
+  tiers: TierConfig;
 }
 
 export const DEFAULT_CONFIG: GameConfig = {
@@ -154,11 +194,15 @@ export const DEFAULT_CONFIG: GameConfig = {
     startSafeRadius: 3,
     distanceRamp: 0.00025, // TODO(play): +0.025 density per 100 cells
     distanceRampCap: 0.12,
-    riverEnabled: true,
-    riverNoiseScale: 160,
-    riverWidth: 0.012,
-    riverDensity: 0.9,
-    riverMinRadius: 60,
+    startRelative: true,
+    terrainEnabled: true,
+    terrainMinRadius: 8, // TODO(play); terrain covers ~13 % (mountains 11 %, rivers 2-3 tiles wide), 0/40 seeds enclose the start
+    mountainNoiseScale: 16, // TODO(play)
+    mountainThreshold: 0.68, // TODO(play)
+    riverNoiseScale: 96, // TODO(play)
+    riverWidth: 0.009, // TODO(play)
+    fordNoiseScale: 10, // TODO(play)
+    fordThreshold: 0.32, // TODO(play)
     uniformDensity: null,
     debtPressureMax: 0.5,
   },
@@ -177,7 +221,7 @@ export const DEFAULT_CONFIG: GameConfig = {
     baseValue: 10, // TODO(play)
     densityDoubling: 0.06, // sim: local stalls/1000 go 12 -> 64 and hits 0 -> 12 between 12% and 35%
     settlementPayoutMult: 1,
-    incomePerSecondMult: 0.02,
+    incomePerTurnMult: 0.02, // user decision: the old per-second value, now per turn; TODO(play)
     streakMultPerClick: 0.02,
     streakMultCap: 3,
     streakCapPerLevel: 0.5,
@@ -196,9 +240,7 @@ export const DEFAULT_CONFIG: GameConfig = {
     moveSpeedPerLevel: 1,
   },
   bases: {
-    transportTilesPerSec: 4, // TODO(play): 100 tiles out = 25 s until the first credits
-    transportSpeedPerLevel: 1, // TODO(play)
-    shipInterval: 2.5, // TODO(play)
+    transportTilesPerSec: 4, // animation only: credits arrive every turn
     levelProdGrowth: 1.15, // user decision: each main-base level raises every base a little
     mainCostBase: 150, // TODO(play)
     mainCostGrowth: 1.6, // TODO(play)
@@ -207,11 +249,20 @@ export const DEFAULT_CONFIG: GameConfig = {
     grandBonusPerBase: 0.05, // user decision: 5 bases x1.25, 10 bases x1.5
   },
   blast: {
-    bandTiles: 5, // user decision
-    minRadius: 3, // user decision: 3-5, 4-5, 4-6, 5-6, ...
-    maxRadius: 5,
+    radiusByTier: [[3, 5], [3.5, 5.5], [4, 6], [4.5, 6.5], [5, 7]], // user decision: higher tiers blast wider; TODO(play) values
     repairCostBase: 20, // TODO(play)
     repairCostPerTile: 0.2, // TODO(play)
+  },
+  fog: {
+    enabled: true,
+    mainRadius: 16, // user decision: fixed radii, no growth
+    baseRadius: 9, // user decision
+    openedRadius: 2, // user decision
+  },
+  tiers: {
+    enabled: true,
+    radii: [24, 48, 88, 128], // user decision 2026-09-22: the old rings (48, 128) split in half; TODO(play)
+    valueMult: [1, 1.5, 2, 3, 4], // TODO(play)
   },
 };
 
@@ -229,5 +280,7 @@ export function makeConfig(partial: DeepPartial<GameConfig> = {}): GameConfig {
     drones: { ...DEFAULT_CONFIG.drones, ...(partial.drones ?? {}) },
     bases: { ...DEFAULT_CONFIG.bases, ...(partial.bases ?? {}) },
     blast: { ...DEFAULT_CONFIG.blast, ...(partial.blast ?? {}) },
+    fog: { ...DEFAULT_CONFIG.fog, ...(partial.fog ?? {}) },
+    tiers: { ...DEFAULT_CONFIG.tiers, ...(partial.tiers ?? {}) },
   };
 }

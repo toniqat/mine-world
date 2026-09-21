@@ -7,11 +7,11 @@ import type { EconConfig } from '../config';
  * Sapper-style push-your-luck layer (user decision): settlement payouts land
  * in `unbanked` and grow with the click streak; stepping on a mine or having a
  * wrong flag settled burns a fraction of `unbanked`. `cashOut()` banks it.
- * Passive income from bases is credited by `Bases.tick` when it reaches the
- * main base. `incomeRate` (nominal) is written by `Bases.recompute()`.
+ * Passive income from bases is credited by `Bases.turn` every tile-changing player action.
+ * `incomeRate` (credits per turn) is written by `Bases.recompute()`.
  */
 export interface OwnedMine {
-  /** Base income per second, before the main-base level multiplier (see Bases). */
+  /** Base income per turn, before the main-base level multiplier (see Bases). */
   income: number;
   /** Credits this base has produced (absent in older saves). */
   produced?: number;
@@ -124,17 +124,18 @@ export class Econ {
   }
 
   /**
-   * Settle a closed component. `mines` are (key, density) pairs of correct flags.
+   * Settle a closed component. `mines` are the correct flags: key, density and
+   * the value multiplier of their mining tier (1 when absent).
    * Returns payout, income added, and money lost to wrong flags.
    */
-  onSettlement(mines: Array<{ key: number; density: number }>, wrong: number): { payout: number; income: number; loss: number } {
+  onSettlement(mines: Array<{ key: number; density: number; mult?: number }>, wrong: number): { payout: number; income: number; loss: number } {
     let payout = 0;
     let income = 0;
     const sm = this.streakMult();
     for (const m of mines) {
-      const v = this.mineValue(m.density);
+      const v = this.mineValue(m.density) * (m.mult ?? 1);
       payout += v * this.cfg.settlementPayoutMult * sm;
-      const inc = v * this.cfg.incomePerSecondMult;
+      const inc = v * this.cfg.incomePerTurnMult;
       income += inc;
       this.owned.set(m.key, { income: inc, dm: this.densityMultiplier(m.density), produced: 0 });
     }

@@ -1,4 +1,4 @@
-import { Board, CellState, isKnownMine, isRevealed, numberOf } from './board';
+import { Board, CellState, isKnownMine, isRevealed, isWall, numberOf } from './board';
 import { cellKey, forEachNeighbor, keyX, keyY } from './key';
 import type { World } from './world';
 
@@ -9,6 +9,9 @@ import type { World } from './world';
  * a numbered cell whose neighbours are all resolved simply yields no
  * constraint (it is "sealed", §6). The active constraint set is therefore
  * proportional to the perimeter of the explored area, never its size.
+ *
+ * Terrain walls count as known safe cells in every mode: like the edge of a
+ * finite board, they take cells out of a number's constraint.
  *
  * Modes (INV-1):
  *   engine  - revealed numbers + committed overrides. Flags are NOT mines.
@@ -52,7 +55,7 @@ export interface Component {
 /** 0 = unknown, 1 = known mine, 2 = known safe. */
 export function classify(ctx: CspContext, mode: Mode, x: number, y: number): 0 | 1 | 2 {
   const s = ctx.board.get(x, y);
-  if (isRevealed(s)) return 2;
+  if (isRevealed(s) || isWall(s)) return 2;
   if (isKnownMine(s)) return 1;
   if (s === CellState.Flag && mode === 'belief') return 1;
   if (mode === 'engine') {

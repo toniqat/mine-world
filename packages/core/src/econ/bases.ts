@@ -1,4 +1,4 @@
-import { CellState, isRevealed, numberOf } from '../board';
+import { CellState, isRevealed, isWall, numberOf } from '../board';
 import type { BaseConfig } from '../config';
 import { hash01 } from '../hash';
 import { cellKey, keyX, keyY } from '../key';
@@ -39,12 +39,14 @@ import type { Econ } from './income';
  * in by Unknown cells) is isolated. It produces nothing and is not linked.
  * Opening a way out lifts isolation.
  *
- * Transport: complexes produce into a local stock and ship it towards the
- * main base every `shipInterval` seconds. Shipments travel edge by edge at
- * `speed()` (the `transport_speed` upgrade adds to it); one arriving at an intermediate complex continues
- * at once (joining its outgoing shipment if it has barely left). Credits are
- * only added when a shipment reaches the main complex, so far bases pay
- * later.
+ * Production is per turn (user decision 2026-09-21; flags count since
+ * 2026-09-22): every player action that changes tiles
+ * (`Game` calls `turn()`) credits each linked base's rate at once, wherever
+ * it is. Shipments are only a picture of the link: each turn every producing
+ * complex sends one down its edge, travelling edge by edge at `speed()`
+ * tiles per second (one arriving at an intermediate complex continues at
+ * once, joining its outgoing shipment if it has barely left). They carry no
+ * credits.
  *
  * Only the main base is levelled. Its level scales every base's production.
  */
@@ -63,7 +65,7 @@ export interface BaseInfo {
   route: number;
   /** Edges on the route to the main base. */
   hops: number;
-  /** Credits per second (0 for the main base, which only receives). */
+  /** Credits per turn (0 for the main base, which only receives). */
   rate: number;
   /** Credits produced so far (delivered or not); 0 for the main base. */
   produced: number;
@@ -73,7 +75,7 @@ export interface BaseInfo {
   disabled: boolean;
   /** Bases in this base's complex (1 when alone). */
   complexSize: number;
-  /** Credits per second of the whole complex. */
+  /** Credits per turn of the whole complex. */
   complexRate: number;
   /** Production multiplier of a grand complex (1 otherwise). */
   complexBonus: number;
@@ -97,16 +99,15 @@ export interface Complex {
   entry: number;
   /** Cells of the outgoing edge from `exit` to `entry` (4-neighbour steps); [hub] when there is none. */
   path: number[];
-  /** Credits per second of all members. */
+  /** Credits per turn of all members. */
   rate: number;
 }
 
-/** Goods on the edge `path` (exit -> entry), `d` tiles from its start. */
+/** A (cosmetic) shipment on the edge `path` (exit -> entry), `d` tiles from its start. */
 export interface Shipment {
   path: number[];
   len: number;
   d: number;
-  amount: number;
 }
 
 /** A complex that has just become grand. */
@@ -121,7 +122,7 @@ export interface GrandFormed {
 
 export interface BasesSnapshot {
   mainLevel: number;
-  /** Stock and shipments not yet delivered; credited on load. */
+  /** Goods not yet delivered in saves from before per-turn production; credited on load. */
   inTransit?: number;
 }
 
@@ -146,11 +147,9 @@ export function pathAt(path: number[], s: number): { x: number; y: number } {
 
 export class Bases {
   mainLevel = 1;
-  /** Level of the `transport_speed` upgrade (set by Game). */
-  speedLevel = 0;
   /** Key of the main base, or null before the first cell is opened. */
   main: number | null = null;
-  /** Base key -> credits per second (Owned mines only; 0 when isolated or disabled). */
+  /** Base key -> credits per turn (Owned mines only; 0 when isolated or disabled). */
   readonly rates = new Map<number, number>();
   /** Hub -> complex. */
   readonly complexes = new Map<number, Complex>();
@@ -160,19 +159,16 @@ export class Bases {
   readonly isolated = new Set<number>();
   /** Keys of Owned mines knocked out by an explosion. */
   readonly disabled = new Set<number>();
-  /** Goods in transit. */
+  /** Shipments on screen (cosmetic). */
   readonly shipments: Shipment[] = [];
   /** Complexes that became grand in the last `recompute` (never on the first one after construction or load). */
   formed: GrandFormed[] = [];
-  /** Hub -> produced or received goods waiting for the next shipment. */
-  private stock = new Map<number, number>();
   /** Hub -> its latest outgoing shipment, which arrivals may join. */
   private lastOut = new Map<number, Shipment>();
   private routes = new Map<number, number>();
   /** Members of grand complexes after the last rebuild, to spot new ones. */
   private grandKeys = new Set<number>();
   private primed = false;
-  private time = 0;
 
   constructor(
     public cfg: BaseConfig,
@@ -196,9 +192,9 @@ export class Bases {
     return n >= this.cfg.grandMinBases ? 1 + this.cfg.grandBonusPerBase * n : 1;
   }
 
-  /** Shipment speed in tiles per second. */
-  speed(level = this.speedLevel): number {
-    return this.cfg.transportTilesPerSec + this.cfg.transportSpeedPerLevel * level;
+  /** Shipment animation speed in tiles per second. */
+  speed(): number {
+    return this.cfg.transportTilesPerSec;
   }
 
   upgradeCost(): number {
@@ -209,13 +205,13 @@ export class Bases {
     return this.mainLevel >= this.cfg.maxLevel;
   }
 
-  /** Can a network edge cross this cell? Everything but Unknown and flagged cells. */
+  /** Can a network edge cross this cell? Everything but Unknown, flagged and terrain (wall) cells. */
   passable(x: number, y: number): boolean {
     const s = this.state(x, y);
-    return s !== CellState.Unknown && s !== CellState.Flag;
+    return s !== CellState.Unknown && s !== CellState.Flag && !isWall(s);
   }
 
-  /** No Unknown or flag among the 8 neighbours, and every number among them has faded out (none next to it either). */
+  /** No Unknown or flag among the 8 neighbours (walls count as resolved), and every number among them has faded out (none next to it either). */
   settled(key: number): boolean {
     const x = keyX(key), y = keyY(key);
     for (let dy = -1; dy <= 1; dy++) {
@@ -237,8 +233,7 @@ export class Bases {
 
   /**
    * Rebuild complexes, the tree, isolation and production rates; sets
-   * `econ.incomeRate` (nominal, before transport delay) and `formed`. Stock
-   * waiting at a base moves to its new complex; shipments in flight keep going.
+   * `econ.incomeRate` (per turn) and `formed`. Shipments in flight keep going.
    */
   recompute(main: number | null): void {
     this.main = main;
@@ -286,16 +281,6 @@ export class Bases {
     }
     this.grandKeys = grand;
     this.primed = true;
-
-    const old = this.stock;
-    this.stock = new Map();
-    for (const [k, v] of old) {
-      const hub = this.complexOf.get(k);
-      // The stock of a complex whose hub was knocked out is lost with it.
-      if (hub === undefined) continue;
-      if (hub === main || this.complexes.get(hub)!.isolated) this.deliver(v);
-      else this.stock.set(hub, (this.stock.get(hub) ?? 0) + v);
-    }
   }
 
   /** Group settled bases within `COMPLEX_REACH` tiles of each other (chained) into complexes. */
@@ -442,30 +427,27 @@ export class Bases {
     return out;
   }
 
-  /** Produce, ship and move goods; credits arrive at the main complex. */
-  tick(dt: number): void {
-    const t0 = this.time;
-    this.time += dt;
+  /**
+   * One turn passed (a tile-changing player action): every linked base's production is
+   * credited at once, and each producing complex sends a shipment towards the
+   * main base for the picture. Uses the rates of the last `recompute`; a base
+   * disabled since then pays nothing.
+   */
+  turn(): void {
     const main = this.main;
-
+    let total = 0;
     for (const [k, m] of this.econ.owned) {
-      const gain = (this.rates.get(k) ?? 0) * dt;
+      const gain = m.disabled ? 0 : (this.rates.get(k) ?? 0);
       if (gain <= 0) continue;
       m.produced = (m.produced ?? 0) + gain;
-      const hub = this.complexOf.get(k)!;
-      if (hub === main) this.deliver(gain);
-      else this.stock.set(hub, (this.stock.get(hub) ?? 0) + gain);
+      total += gain;
     }
+    if (total > 0) this.deliver(total);
+    for (const c of this.complexes.values()) if (c.hub !== main && c.rate > 0) this.ship(c.hub);
+  }
 
-    const T = this.cfg.shipInterval;
-    for (const [hub, amt] of this.stock) {
-      // Per-complex phase so shipments do not leave in lockstep.
-      const ph = hash01(0x5b1, keyX(hub), keyY(hub)) * T;
-      if (Math.floor((this.time + ph) / T) === Math.floor((t0 + ph) / T)) continue;
-      this.stock.delete(hub);
-      if (amt > 0) this.ship(hub, amt);
-    }
-
+  /** Move the shipments (animation only). */
+  tick(dt: number): void {
     const step = this.speed() * dt;
     const list = this.shipments;
     let n = 0;
@@ -480,21 +462,17 @@ export class Bases {
       const from = this.complexOf.get(s.path[0]);
       if (from !== undefined && this.lastOut.get(from) === s) this.lastOut.delete(from);
       const to = this.complexOf.get(s.path[s.path.length - 1]);
-      if (to === undefined || to === main) this.deliver(s.amount);
-      else this.ship(to, s.amount);
+      if (to !== undefined && to !== this.main) this.ship(to);
     }
   }
 
-  /** Send goods from the complex `hub` towards its parent. */
-  private ship(hub: number, amount: number): void {
+  /** Send a shipment from the complex `hub` towards its parent. */
+  private ship(hub: number): void {
     const c = this.complexes.get(hub);
-    if (!c || c.parent === null) return this.deliver(amount);
+    if (!c || c.parent === null) return;
     const last = this.lastOut.get(hub);
-    if (last && last.path === c.path && last.d < JOIN_TILES) {
-      last.amount += amount;
-      return;
-    }
-    const s: Shipment = { path: c.path, len: c.path.length - 1, d: 0, amount };
+    if (last && last.path === c.path && last.d < JOIN_TILES) return;
+    const s: Shipment = { path: c.path, len: c.path.length - 1, d: 0 };
     this.shipments.push(s);
     this.lastOut.set(hub, s);
   }
@@ -502,14 +480,6 @@ export class Bases {
   private deliver(amount: number): void {
     this.econ.credits += amount;
     this.econ.lifetime.earned += amount;
-  }
-
-  /** Stock plus shipments not yet delivered. */
-  inTransit(): number {
-    let sum = 0;
-    for (const v of this.stock.values()) sum += v;
-    for (const s of this.shipments) sum += s.amount;
-    return sum;
   }
 
   info(key: number): BaseInfo | null {
@@ -547,10 +517,10 @@ export class Bases {
   }
 
   snapshot(): BasesSnapshot {
-    return { mainLevel: this.mainLevel, inTransit: this.inTransit() };
+    return { mainLevel: this.mainLevel };
   }
 
-  /** Call after `econ.restore`: undelivered goods are credited at once. Grand complexes existing at load do not count as newly formed. */
+  /** Call after `econ.restore`: undelivered goods of older saves are credited at once. Grand complexes existing at load do not count as newly formed. */
   restore(s: BasesSnapshot | undefined): void {
     this.mainLevel = s?.mainLevel ?? 1;
     this.primed = false;

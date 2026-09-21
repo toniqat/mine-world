@@ -1,4 +1,4 @@
-import { Container, Graphics, Sprite, Text, type Application } from 'pixi.js';
+import { Container, Graphics, Sprite, Text, type Application, type Texture } from 'pixi.js';
 import { CHUNK, CellState, cellKey, hash01, inBlast, inDisc, isRevealed, keyX, keyY, numberOf, type CellChange, type DroneState, type Game, type ScannerInfo, type Shipment } from '@mine/core';
 import { hex, type Palette } from '../theme';
 import type { Camera } from './camera';
@@ -19,9 +19,15 @@ const COVER_MS = 140;
 /** ...starting this much later per cell of distance from where its cascade began. */
 const COVER_STEP_MS = 11;
 const MAX_COVERS = 1500;
+/** Fog lifting from a cell fades out over this long. */
+const FOG_LIFT_MS = 600;
 const MARK_IN_MS = 110;
 const MARK_OUT_MS = 70;
 const PULSE_MS = 240;
+/** A pressed tile (clicking a number) shrinks and springs back over this long... */
+const PRESS_MS = 160;
+/** ...down to this fraction of its size. */
+const PRESS_SCALE = 0.82;
 /** Ripple delay per cell of distance from the settlement batch centre. */
 const PULSE_STEP_MS = 17.5;
 const MAX_MARK_ANIMS = 64;
@@ -63,6 +69,8 @@ interface CellFx {
   key: number;
   sprite: Sprite;
   start: number;
+  /** Fade duration. */
+  ms: number;
 }
 
 interface DigitFade {
@@ -112,6 +120,12 @@ interface GrandFx {
   start: number;
 }
 
+/** A closed tile pressed by clicking the number next to it. */
+interface Press {
+  key: number;
+  start: number;
+}
+
 interface Pulse {
   keys: number[];
   cx: number;
@@ -119,6 +133,13 @@ interface Pulse {
   color: number;
   start: number;
   end: number;
+}
+
+/** Unknown / flagged cell: "?" when marked; a locked-tier tile (own colour + padlock) until its technology is learned. */
+function closedTexture(game: Game, tex: CellTextures, x: number, y: number, s: number): Texture {
+  if (s === CellState.Flag) return tex.flag;
+  if (game.questioned(x, y)) return tex.question;
+  return game.locked(x, y) ? tex.locked : tex.unknown;
 }
 
 class ChunkView {
@@ -168,7 +189,19 @@ class ChunkView {
     const y = this.cy * CHUNK + (i >> 4);
     const s = game.cellState(x, y);
     this.state[i] = s;
-    this.bg[i].texture = s === CellState.Owned ? ownedTexture(tex, baseStyle(game, cellKey(x, y))) : stateTexture(tex, s);
+    if (game.fogged(x, y)) {
+      this.bg[i].texture = tex.fog;
+      this.done[i] = 0;
+      this.dim[i] = 0;
+      this.digit[i].visible = false;
+      return false;
+    }
+    this.bg[i].texture =
+      s === CellState.Owned
+        ? ownedTexture(tex, baseStyle(game, cellKey(x, y)))
+        : s === CellState.Unknown || s === CellState.Flag
+          ? closedTexture(game, tex, x, y, s)
+          : stateTexture(tex, s);
     const d = this.digit[i];
     const wasDone = this.done[i] === 1;
     if (isRevealed(s) && numberOf(s) > 0) {
@@ -222,6 +255,8 @@ export class BoardView {
   private labelPool: Text[] = [];
   private scannerLabels: Text[] = [];
   private chunks = new Map<number, ChunkView>();
+  /** Chunks were painted after the start was set (terrain visible). */
+  private terrainShown = false;
   private tex: CellTextures;
   private palette: Palette;
   private probabilities: Map<number, number> | null = null;
@@ -255,6 +290,7 @@ export class BoardView {
   private coverPool: Sprite[] = [];
   private digitFades: DigitFade[] = [];
   private pulses: Pulse[] = [];
+  private presses: Press[] = [];
   private densityOverlay = false;
   private digitsVisible = true;
   private lastVisible = { x0: 0, y0: 0, x1: -1, y1: -1 };
@@ -266,6 +302,7 @@ export class BoardView {
     palette: Palette,
   ) {
     this.palette = palette;
+    this.terrainShown = game.world.started;
     this.tex = buildTextures(app.renderer, palette);
     this.hoverSprite = new Sprite(this.tex.unknownHover);
     this.hoverSprite.visible = false;
@@ -292,6 +329,7 @@ export class BoardView {
 
   setGame(game: Game): void {
     this.game = game;
+    this.terrainShown = game.world.started;
     for (const c of this.chunks.values()) c.destroy();
     this.chunks.clear();
     this.lastVisible = { x0: 0, y0: 0, x1: -1, y1: -1 };
@@ -313,6 +351,8 @@ export class BoardView {
     for (const c of this.covers) this.releaseCover(c);
     this.covers = [];
     this.digitFades = [];
+    for (const p of this.presses) this.pressScale(p.key, 1);
+    this.presses = [];
     this.ghosts = [];
     this.droneLines.clear();
     this.drag = null;
@@ -335,6 +375,11 @@ export class BoardView {
 
   applyChanges(list: CellChange[]): void {
     const now = performance.now();
+    // Terrain exists only once the first click set the start: repaint what is already on screen.
+    if (!this.terrainShown && this.game.world.started) {
+      this.terrainShown = true;
+      for (const c of this.chunks.values()) c.refresh(this.tex, this.game);
+    }
     // Changed cells and their neighbours: a neighbouring number may have become done.
     const touched = new Set<number>();
     for (const c of list) {
@@ -347,12 +392,16 @@ export class BoardView {
         else if (isRevealed(c.state) && (prev === CellState.Unknown || prev === CellState.Flag)) {
           // Cascades ripple outwards from the cell that started them.
           const delay = c.from === undefined ? 0 : Math.hypot(c.x - keyX(c.from), c.y - keyY(c.from)) * COVER_STEP_MS;
-          this.startCover(k, prev, now + delay);
+          // The tile it showed (tier tint, "?", flag) fades away.
+          const was = v.bg[((c.y & 15) << 4) | (c.x & 15)].texture;
+          this.startCover(k, was, now + delay, COVER_MS);
         }
       }
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) touched.add(cellKey(c.x + dx, c.y + dy));
     }
     for (const k of touched) this.paintCell(keyX(k), keyY(k), now);
+    // The hovered cell may have been flagged, marked "?" or opened.
+    this.setHover(this.hover);
     this.overlayDirty = true;
   }
 
@@ -418,7 +467,27 @@ export class BoardView {
   }
 
   /** Fade the previous tile (Unknown or flag) away over a freshly opened cell, starting at `start`. */
-  private startCover(key: number, prev: number, start: number): void {
+  /** The fog of war lifted from these cells: repaint them under a fading fog cover. */
+  liftFog(keys: number[]): void {
+    const now = performance.now();
+    for (const k of keys) {
+      const x = keyX(k);
+      const y = keyY(k);
+      if (!this.chunks.has(cellKey(x >> 4, y >> 4))) continue;
+      this.startCover(k, this.tex.fog, now + hash01(7, x, y) * 120, FOG_LIFT_MS);
+      this.paintCell(x, y);
+    }
+    this.overlayDirty = true;
+  }
+
+  /** Repaint every chunk (a mining technology unlocked a tier). */
+  refreshAll(): void {
+    for (const c of this.chunks.values()) c.refresh(this.tex, this.game);
+    this.setHover(this.hover);
+    this.overlayDirty = true;
+  }
+
+  private startCover(key: number, tex: Texture, start: number, ms: number): void {
     const old = this.covers.findIndex((c) => c.key === key);
     if (old >= 0) {
       this.releaseCover(this.covers[old]);
@@ -426,14 +495,14 @@ export class BoardView {
     }
     if (this.covers.length >= MAX_COVERS) return;
     const sprite = this.coverPool.pop() ?? new Sprite();
-    sprite.texture = stateTexture(this.tex, prev);
+    sprite.texture = tex;
     sprite.anchor.set(0.5);
     sprite.position.set((keyX(key) + 0.5) * CELL, (keyY(key) + 0.5) * CELL);
     sprite.scale.set(1);
     sprite.alpha = 1;
     sprite.visible = true;
     this.coverLayer.addChild(sprite);
-    this.covers.push({ key, sprite, start });
+    this.covers.push({ key, sprite, start, ms });
   }
 
   private releaseCover(c: CellFx): void {
@@ -445,14 +514,14 @@ export class BoardView {
   private updateCovers(now: number): void {
     if (!this.covers.length) return;
     this.covers = this.covers.filter((c) => {
-      const t = (now - c.start) / COVER_MS;
+      const t = (now - c.start) / c.ms;
       if (t >= 1) {
         this.releaseCover(c);
         return false;
       }
       if (t <= 0) return true;
       c.sprite.alpha = 1 - t * t;
-      c.sprite.scale.set(1 - 0.12 * t);
+      if (c.ms === COVER_MS) c.sprite.scale.set(1 - 0.12 * t);
       return true;
     });
   }
@@ -475,6 +544,43 @@ export class BoardView {
       }
       d.visible = true;
       d.alpha = f.from * (1 - t);
+      return true;
+    });
+  }
+
+  /** Clicking a number: its closed neighbours shrink and spring back, as if pressed. */
+  press(keys: number[]): void {
+    const now = performance.now();
+    for (const k of keys) {
+      const old = this.presses.find((p) => p.key === k);
+      if (old) old.start = now;
+      else this.presses.push({ key: k, start: now });
+    }
+  }
+
+  /** Scale a cell's tile about its centre. */
+  private pressScale(key: number, k: number): void {
+    const x = keyX(key);
+    const y = keyY(key);
+    const v = this.chunks.get(cellKey(x >> 4, y >> 4));
+    if (!v) return;
+    const s = v.bg[((y & 15) << 4) | (x & 15)];
+    const off = (CELL * (1 - k)) / 2;
+    s.scale.set(k);
+    s.position.set((x & 15) * CELL + off, (y & 15) * CELL + off);
+  }
+
+  private updatePresses(now: number): void {
+    if (!this.presses.length) return;
+    this.presses = this.presses.filter((p) => {
+      const t = (now - p.start) / PRESS_MS;
+      if (t >= 1) {
+        this.pressScale(p.key, 1);
+        return false;
+      }
+      // Quick dip, slower spring back.
+      const u = t < 0.35 ? t / 0.35 : 1 - (t - 0.35) / 0.65;
+      this.pressScale(p.key, 1 - (1 - PRESS_SCALE) * Math.sin((u * Math.PI) / 2));
       return true;
     });
   }
@@ -537,8 +643,11 @@ export class BoardView {
 
   setHover(cell: { x: number; y: number } | null): void {
     this.hover = cell;
-    if (cell && this.game.cellState(cell.x, cell.y) === CellState.Unknown) {
+    // Before the start any cell can take the main base, fog or not.
+    const g = this.game;
+    if (cell && g.cellState(cell.x, cell.y) === CellState.Unknown && (!g.fogged(cell.x, cell.y) || !g.world.started) && !g.locked(cell.x, cell.y)) {
       this.hoverSprite.visible = true;
+      this.hoverSprite.texture = g.questioned(cell.x, cell.y) ? this.tex.questionHover : this.tex.unknownHover;
       this.hoverSprite.position.set(cell.x * CELL, cell.y * CELL);
     } else {
       this.hoverSprite.visible = false;
@@ -645,6 +754,7 @@ export class BoardView {
     const now = performance.now();
     this.updateMarks(now);
     this.updateCovers(now);
+    this.updatePresses(now);
     this.updateDigitFades(now);
     this.drawFx(now);
     this.drawShipments(now);

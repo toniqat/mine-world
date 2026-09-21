@@ -1,4 +1,4 @@
-import { UPGRADES, keyX, keyY, type BaseInfo, type Game, type LogEntry, type UpgradeGroup } from '@mine/core';
+import { UPGRADES, keyX, keyY, type BaseInfo, type Game, type LogEntry } from '@mine/core';
 import { clock, fmt } from '../format';
 import { getLang, t, upgradeDesc, upgradeName, type StringKey } from '../i18n';
 import type { Settings } from '../storage';
@@ -104,7 +104,7 @@ export class Panels {
     const rate = game.econ.incomeRate;
     this.body.append(
       el('div', { class: 'help', text: t('base.mainHint', { g: bases.cfg.levelProdGrowth.toFixed(2) }) }),
-      kv(t('base.network'), `${t('base.perSec', { v: fmt(rate) })} · ${t('base.perHour', { v: fmt(rate * 3600) })}`),
+      kv(t('base.network'), t('base.perTurn', { v: fmt(rate) })),
       kv(t('base.active'), String(active)),
     );
     if (bases.isolated.size) this.body.append(kv(t('base.isolatedCount'), String(bases.isolated.size)));
@@ -112,8 +112,23 @@ export class Panels {
     if (!bases.maxed()) this.body.append(kv(t('base.nextLevel'), t('base.upgrade.next', { n: b.level + 1, prod: bases.levelMult(b.level + 1).toFixed(2) })));
 
     this.body.append(el('div', { class: 'section', text: t('base.upgrades') }));
-    const groups: UpgradeGroup[] = ['network', 'misc'];
-    for (const g of groups) for (const u of UPGRADES.filter((x) => x.group === g)) this.body.append(this.upgradeRow(game, u.id));
+    for (const u of UPGRADES.filter((x) => x.group === 'misc')) this.body.append(this.upgradeRow(game, u.id));
+
+    if (game.cfg.tiers.enabled) {
+      this.body.append(el('div', { class: 'section', text: t('base.tech') }), el('div', { class: 'help', text: t('base.techHint') }));
+      for (const u of UPGRADES.filter((x) => x.group === 'tech')) this.body.append(this.upgradeRow(game, u.id));
+    }
+  }
+
+  /** What the next mining level opens: where its tier begins, its mine value and blast range. */
+  private miningNow(game: Game, id: string): string | null {
+    if (id !== 'mining') return null;
+    const tier = game.miningTier() + 1;
+    const c = game.cfg.tiers;
+    const r = c.radii[tier - 2];
+    if (r === undefined) return null;
+    const range = game.cfg.blast.radiusByTier[Math.min(game.cfg.blast.radiusByTier.length - 1, tier - 1)];
+    return t('up.mining.now', { c: tier - 1, t: tier, r, m: c.valueMult[Math.min(c.valueMult.length - 1, tier - 1)], min: range[0], max: range[1] });
   }
 
   private upgradeRow(game: Game, id: string): HTMLElement {
@@ -122,11 +137,9 @@ export class Panels {
     const blocked = game.upgrades.blocked(id);
     const afford = game.econ.canAfford(cost);
     const now =
-      id === 'transport_speed'
-        ? t('up.transport_speed.now', { v: fmt(game.bases.speed()) })
-        : id === 'streak_cap'
-          ? t('up.streak_cap.now', { v: (game.econ.cfg.streakMultCap + game.econ.streakCapBonus).toFixed(1) })
-          : null;
+      id === 'streak_cap'
+        ? t('up.streak_cap.now', { v: (game.econ.cfg.streakMultCap + game.econ.streakCapBonus).toFixed(1) })
+        : this.miningNow(game, id);
     const left = el(
       'div',
       {},
@@ -176,16 +189,13 @@ export class Panels {
     this.title.textContent = `${b.isolated ? t('base.isolated') : t('base.name')} (${b.x}, ${b.y})`;
     if (b.isolated) this.body.append(el('div', { class: 'help', text: t('base.isolatedHint') }));
     this.body.append(
-      kv(t('base.rate'), `${t('base.perSec', { v: fmt(b.rate) })} · ${t('base.perHour', { v: fmt(b.rate * 3600) })}`),
+      kv(t('base.rate'), t('base.perTurn', { v: fmt(b.rate) })),
       kv(t('base.produced'), fmt(b.produced)),
       kv(t('base.level'), t('level', { n: b.level })),
     );
     if (b.complexSize > 1) this.body.append(kv(t('base.complex'), t('base.complexValue', { n: b.complexSize, v: fmt(b.complexRate) })));
     if (b.complexBonus > 1) this.body.append(kv(t('base.grand'), `×${b.complexBonus.toFixed(2)}`));
-    if (!b.isolated) {
-      const eta = clock(Math.ceil(b.route / bases.speed()));
-      this.body.append(kv(t('base.route'), b.route ? t('base.routeValue', { n: b.route, hops: b.hops, t: eta }) : t('base.inMain')));
-    }
+    if (!b.isolated) this.body.append(kv(t('base.route'), b.route ? t('base.routeValue', { n: b.route, hops: b.hops }) : t('base.inMain')));
     if (b.children) this.body.append(kv(t('base.children'), String(b.children)));
     this.body.append(el('div', { class: 'help', text: t('base.normalHint') }));
     if (gotoMain) this.body.append(gotoMain);

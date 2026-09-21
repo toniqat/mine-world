@@ -1,5 +1,5 @@
 import { DroneManager, type DroneState } from './agents/drone';
-import { Board, CellState, isKnownMine, isRevealed, numberOf, revealedState } from './board';
+import { Board, CellState, isKnownMine, isRevealed, isWall, numberOf, revealedState } from './board';
 import { type GameConfig, makeConfig } from './config';
 import { collectRegion, type CspContext, type Mode, type ScannerInfo } from './csp';
 import { Bases, type BaseInfo, type GrandFormed } from './econ/bases';
@@ -8,6 +8,7 @@ import { audit, type AuditResult } from './econ/contamination';
 import { Econ } from './econ/income';
 import { Upgrades } from './econ/upgrades';
 import { Emitter } from './events';
+import { Fog } from './fog';
 import { cellKey, chebyshev, forEachNeighbor, keyX, keyY } from './key';
 import { resolveReveal } from './resolve';
 import type { SaveData } from './save';
@@ -114,6 +115,10 @@ export type GameEvents = {
   bases: Bases;
   /** A complex just became grand (at least `grandMinBases` bases). */
   grand: GrandFormed;
+  /** Cells the fog of war just lifted from (keys). */
+  fog: number[];
+  /** The mining technology levelled up: the highest tier that can now be mined. */
+  tech: number;
   reset: { seed: number };
 };
 
@@ -127,6 +132,9 @@ export class Game {
   ctx!: CspContext;
   econ!: Econ;
   private _bases!: Bases;
+  fog!: Fog;
+  /** Unknown cells the player marked with "?": a plain note, no game effect (not a flag, never settled). */
+  questions = new Set<number>();
   upgrades!: Upgrades;
   drones!: DroneManager;
   droneLoadout: DroneLoadout = emptyLoadout();
@@ -142,6 +150,12 @@ export class Game {
   private inAction = 0;
   /** The bases changed (new Owned mine, or a cell opened next to an isolated base). */
   private basesDirty = true;
+  /** Flags placed since the last opening; they (and flags around them) settle on the next one (see `afterAction`). */
+  private deferred = new Set<number>();
+  /** The player opened something in the current action: a turn passes when it ends. */
+  private turnPending = false;
+  /** Inside `chord`: its reveals are never rescued. */
+  private chording = false;
 
   constructor(cfg: Partial<GameConfig> | GameConfig = {}) {
     this.cfg = makeConfig(cfg as GameConfig);
@@ -152,6 +166,7 @@ export class Game {
     this.cfg.seed = seed;
     this.world = new World(this.cfg.world, seed);
     this.board = new Board();
+    this.board.terrain = (x, y) => this.world.terrain(x, y);
     this.scanners = [];
     this.ctx = { board: this.board, world: this.world, scanners: this.scanners };
     const cores = this.econ?.cores ?? 0;
@@ -161,6 +176,8 @@ export class Game {
     if (lifetime) this.econ.lifetime = lifetime;
     this._bases = new Bases(this.cfg.bases, this.econ, (x, y) => this.board.get(x, y));
     this.basesDirty = true;
+    this.fog = new Fog(this.cfg.fog);
+    this.questions = new Set();
     this.upgrades = new Upgrades();
     this.applyUpgrades();
     this.drones = new DroneManager(this.cfg.drones);
@@ -170,6 +187,8 @@ export class Game {
     this.rescues = { left: this.cfg.resolve.forgivingRescues };
     this.stats = { interventions: 0, minesMoved: 0, closures: 0, forfeited: 0 };
     this.changed = [];
+    this.deferred = new Set();
+    this.turnPending = false;
     this.nextScannerId = 1;
   }
 
@@ -185,12 +204,50 @@ export class Game {
     return this.board.get(x, y);
   }
 
+  /**
+   * Hidden by the fog of war: a closed cell (Unknown, flag or wall) no vision
+   * source has seen yet. It cannot be opened or flagged, and walls under it
+   * look like any other fogged cell. Before the start is set everything is
+   * fogged; the first click places the main base anyway (see `reveal`).
+   */
+  fogged(x: number, y: number): boolean {
+    if (!this.cfg.fog.enabled || (this.world.started && this.fog.isSeen(x, y))) return false;
+    const s = this.board.get(x, y);
+    return s === CellState.Unknown || s === CellState.Flag || isWall(s);
+  }
+
+  /** Mining tier of a cell: 1 + the number of `tiers.radii` rings its distance from the main base has passed. */
+  tierAt(x: number, y: number): number {
+    const c = this.cfg.tiers;
+    if (!c.enabled || !this.world.started) return 1;
+    const d = Math.hypot(x - this.world.startX, y - this.world.startY);
+    let t = 1;
+    for (const r of c.radii) if (d >= r) t++;
+    return t;
+  }
+
+  /** Highest tier the mining technology allows: 1 + its level. */
+  miningTier(): number {
+    return 1 + this.upgrades.level('mining');
+  }
+
+  /** In a tier the mining technology does not reach yet: cannot be opened, flagged or chorded into. */
+  locked(x: number, y: number): boolean {
+    return this.cfg.tiers.enabled && this.tierAt(x, y) > this.miningTier();
+  }
+
+  /** Mine value multiplier of the cell's tier. */
+  tierValueMult(x: number, y: number): number {
+    const m = this.cfg.tiers.valueMult;
+    return m.length ? m[Math.min(m.length - 1, this.tierAt(x, y) - 1)] : 1;
+  }
+
   densityAt(x: number, y: number): number {
     return this.world.density(x, y);
   }
 
   mineValueAt(x: number, y: number): number {
-    return this.econ.mineValue(this.world.density(x, y));
+    return this.econ.mineValue(this.world.density(x, y)) * this.tierValueMult(x, y);
   }
 
   /** Solver tiers of the drone equipment (none unless equipped). */
@@ -215,9 +272,9 @@ export class Game {
     return this.cfg.drones.baseMoveTilesPerSec + this.cfg.drones.moveSpeedPerLevel * this.droneLoadout.speedLevel;
   }
 
-  /** Radius range of a blast at (x, y): grows with the distance from the main base. */
+  /** Radius range of a blast at (x, y): wider in higher mining tiers. */
   blastRangeAt(x: number, y: number): BlastRange {
-    return blastRange(this.cfg.blast, Math.hypot(x - this.world.startX, y - this.world.startY));
+    return blastRange(this.cfg.blast, this.tierAt(x, y));
   }
 
   /** Credits a repair costs now: grows with the number of opened cells. */
@@ -270,10 +327,16 @@ export class Game {
 
   reveal(x: number, y: number, actor: Actor = PLAYER, basis?: number[]): RevealResult {
     if (this.board.get(x, y) !== CellState.Unknown) return { hit: false, revealed: 0, intervened: false };
-    // The world starts all Unknown; the first cell opened becomes the safe start area.
-    this.world.setStart(x, y);
+    // The world starts all Unknown and fogged. The first click places the main
+    // base there (fog or not) and opens the mine-free start area around it.
+    if (!this.world.started) {
+      this.world.setStart(x, y);
+      this.updateFog();
+    }
+    if (this.fogged(x, y) || this.locked(x, y)) return { hit: false, revealed: 0, intervened: false };
     this.inAction++;
-    const r = resolveReveal({ cfg: this.cfg, ctx: this.ctx, rescues: this.rescues }, x, y);
+    if (actor.kind === 'player') this.turnPending = true;
+    const r = resolveReveal({ cfg: this.cfg, ctx: this.ctx, rescues: this.rescues }, x, y, !this.chording);
     if (r.intervened) {
       this.stats.interventions++;
       this.stats.minesMoved += r.movedMines;
@@ -301,7 +364,11 @@ export class Game {
     return result;
   }
 
-  /** Reveal every unknown neighbour of a satisfied number (classic chord). */
+  /**
+   * Reveal every unknown neighbour of a satisfied number (classic chord), as
+   * one action (one turn). The reveals are never rescued: a chord trusts the
+   * flags, so a wrong flag lets the real mine go off.
+   */
   chord(x: number, y: number, actor: Actor = PLAYER): RevealResult {
     const s = this.board.get(x, y);
     const out: RevealResult = { hit: false, revealed: 0, intervened: false };
@@ -312,34 +379,67 @@ export class Game {
     forEachNeighbor(x, y, (nx, ny) => {
       const ns = this.board.get(nx, ny);
       if (ns === CellState.Flag || isKnownMine(ns)) marked++;
-      else if (ns === CellState.Unknown) targets.push([nx, ny]);
+      else if (ns === CellState.Unknown && !this.fogged(nx, ny) && !this.locked(nx, ny)) targets.push([nx, ny]);
     });
     if (marked !== n || targets.length === 0) return out;
+    this.inAction++;
+    this.chording = true;
     for (const [tx, ty] of targets) {
       const r = this.reveal(tx, ty, actor);
       out.hit = out.hit || r.hit;
       out.revealed += r.revealed;
       out.intervened = out.intervened || r.intervened;
     }
+    this.chording = false;
+    this.inAction--;
+    this.afterAction();
     return out;
   }
 
   /** Toggle a flag. Has no observable effect beyond the flag itself (INV-2) except component closure (§9.2). */
   toggleFlag(x: number, y: number, actor: Actor = PLAYER): boolean {
     const s = this.board.get(x, y);
+    if (this.fogged(x, y) || this.locked(x, y)) return false;
     if (s === CellState.Unknown) return this.setFlag(x, y, true, actor), true;
     if (s === CellState.Flag) return this.setFlag(x, y, false, actor), false;
     return false;
   }
 
+  /** Carries a "?" mark (see `cycleMark`). */
+  questioned(x: number, y: number): boolean {
+    return this.questions.has(cellKey(x, y));
+  }
+
+  /**
+   * Right-click cycle: Unknown -> flag -> "?" -> Unknown. The "?" is only a
+   * note for the player: the cell stays Unknown for every rule (it can be
+   * opened, chorded into and is never settled).
+   */
+  cycleMark(x: number, y: number): void {
+    const s = this.board.get(x, y);
+    if (this.fogged(x, y) || this.locked(x, y)) return;
+    const k = cellKey(x, y);
+    if (s === CellState.Flag) {
+      // Mark first: lifting the flag emits the cell change that repaints it.
+      this.questions.add(k);
+      this.setFlag(x, y, false);
+    } else if (s === CellState.Unknown) {
+      if (this.questions.delete(k)) this.events.emit('cells', [{ x, y, state: s }]);
+      else this.setFlag(x, y, true);
+    }
+  }
+
   setFlag(x: number, y: number, on: boolean, actor: Actor = PLAYER): void {
     const s = this.board.get(x, y);
-    if (on && s !== CellState.Unknown) return;
+    if (on && (s !== CellState.Unknown || this.fogged(x, y) || this.locked(x, y))) return;
     if (!on && s !== CellState.Flag) return;
     this.inAction++;
+    // Placing a flag is a player turn; lifting one (flag -> "?") is not.
+    if (on && actor.kind === 'player') this.turnPending = true;
     this.setCell(x, y, on ? CellState.Flag : CellState.Unknown);
     this.inAction--;
-    this.afterAction();
+    // A flag never settles anything by itself; the next opening does.
+    this.afterAction(false);
   }
 
   cashOut(): number {
@@ -358,14 +458,13 @@ export class Game {
     this.applyUpgrades();
     this.pushLog('purchase', undefined, undefined, { id, cost, level: this.upgrades.level(id) });
     this.events.emit('econ', this.econ);
-    if (id === 'transport_speed') this.events.emit('bases', this.bases);
+    if (id === 'mining') this.events.emit('tech', this.miningTier());
     return { ok: true };
   }
 
   /** Push upgrade levels into the systems they tune. */
   private applyUpgrades(): void {
     this.econ.streakCapBonus = this.cfg.econ.streakCapPerLevel * this.upgrades.level('streak_cap');
-    this._bases.speedLevel = this.upgrades.level('transport_speed');
   }
 
   /**
@@ -373,8 +472,7 @@ export class Game {
    * the main base and disable every base inside (the main base is immune).
    */
   private explode(x: number, y: number): BlastEvent {
-    const d = Math.hypot(x - this.world.startX, y - this.world.startY);
-    const r = blastRadius(this.cfg.blast, d, this.cfg.seed, x, y, this.econ.lifetime.hits);
+    const r = blastRadius(this.cfg.blast, this.tierAt(x, y), this.cfg.seed, x, y, this.econ.lifetime.hits);
     const disabled: number[] = [];
     for (const [k, m] of this.econ.owned) {
       if (m.disabled || !inBlast(keyX(k) - x, keyY(k) - y, r)) continue;
@@ -519,6 +617,7 @@ export class Game {
     if (dt <= 0) return;
     this.time += dt;
     this.bases.tick(dt);
+    this.updateFog();
     if (this.drones.drones.length) {
       const sig = () => this.drones.drones.map((d) => `${d.status}${d.placed ? `@${d.x},${d.y}` : ''}`).join();
       const before = sig();
@@ -553,6 +652,9 @@ export class Game {
 
   private setCell(x: number, y: number, s: number, from?: number): void {
     this.board.set(x, y, s);
+    // An opened cell sees around itself, so a cascade never runs into fog.
+    if (isRevealed(s) && this.cfg.fog.enabled) this.fog.opened(x, y);
+    if (s !== CellState.Unknown && this.questions.size) this.questions.delete(cellKey(x, y));
     this.changed.push(from === undefined ? { x, y, state: s } : { x, y, state: s, from });
   }
 
@@ -567,7 +669,7 @@ export class Game {
       const x = keyX(k);
       const y = keyY(k);
       if (this.board.get(x, y) !== CellState.Unknown) continue;
-      if (count > 0 && (count >= cascadeCap || chebyshev(x, y, sx, sy) > cascadeRadius)) continue;
+      if (count > 0 && (count >= cascadeCap || chebyshev(x, y, sx, sy) > cascadeRadius || this.fogged(x, y) || this.locked(x, y))) continue;
       let n = 0;
       forEachNeighbor(x, y, (nx, ny) => {
         const s = this.board.get(nx, ny);
@@ -586,33 +688,49 @@ export class Game {
   }
 
   /**
-   * Settlement detection (§9.2), then event flush. Re-entrant safe.
+   * Settlement detection (§9.2), the turn, then event flush. Re-entrant safe.
    *
    * A flag is settle-able once every revealed number next to it is sealed
    * (has no Unknown neighbour left): its constraints can never change again.
    * Settle-able flags linked through shared sealed numbers form one claim
    * batch and are judged together.
+   *
+   * Only an opening settles (`settle`; user decision 2026-09-21): a flag
+   * action just remembers its cells, and the next opening anywhere settles
+   * whatever became settle-able around them, so placing a flag never turns
+   * flags into bases on the spot.
    */
-  private afterAction(): void {
+  private afterAction(settle = true): void {
     if (this.inAction > 0) return;
-    let cursor = 0;
-    const done = new Set<number>();
-    while (cursor < this.changed.length) {
-      const c = this.changed[cursor++];
-      const candidates: number[] = [];
-      const consider = (x: number, y: number) => {
-        if (!this.isSealedNumber(x, y)) return;
-        forEachNeighbor(x, y, (fx, fy) => {
-          const fk = cellKey(fx, fy);
-          if (!done.has(fk) && this.board.get(fx, fy) === CellState.Flag && this.isSettleable(fx, fy)) candidates.push(fk);
-        });
+    if (settle) {
+      const done = new Set<number>();
+      const settleAround = (cx: number, cy: number) => {
+        const candidates: number[] = [];
+        const consider = (x: number, y: number) => {
+          if (!this.isSealedNumber(x, y)) return;
+          forEachNeighbor(x, y, (fx, fy) => {
+            const fk = cellKey(fx, fy);
+            if (!done.has(fk) && this.board.get(fx, fy) === CellState.Flag && this.isSettleable(fx, fy)) candidates.push(fk);
+          });
+        };
+        consider(cx, cy);
+        forEachNeighbor(cx, cy, consider);
+        for (const fk of candidates) {
+          if (done.has(fk)) continue;
+          const batch = this.collectBatch(fk, done);
+          if (batch.length) this.settle(batch);
+        }
       };
-      consider(c.x, c.y);
-      forEachNeighbor(c.x, c.y, consider);
-      for (const fk of candidates) {
-        if (done.has(fk)) continue;
-        const batch = this.collectBatch(fk, done);
-        if (batch.length) this.settle(batch);
+      const deferred = [...this.deferred];
+      this.deferred.clear();
+      for (const k of deferred) settleAround(keyX(k), keyY(k));
+      // settle() appends to `changed`, so the length is read every round.
+      for (let i = 0; i < this.changed.length; i++) settleAround(this.changed[i].x, this.changed[i].y);
+    } else {
+      // Lifting a flag cannot make anything settle-able, so only placed flags are kept.
+      for (const c of this.changed) {
+        if (c.state === CellState.Flag) this.deferred.add(cellKey(c.x, c.y));
+        else this.deferred.delete(cellKey(c.x, c.y));
       }
     }
     // A cell that stops being closed (opened, owned, lost, exploded) may settle
@@ -620,6 +738,17 @@ export class Game {
     // complex; the rebuild waits for the next read of `bases`. Placing or
     // lifting a flag cannot: the network treats a flag exactly like Unknown.
     if (!this.basesDirty && this.econ.owned.size && this.changed.some((c) => c.state !== CellState.Unknown && c.state !== CellState.Flag)) this.basesDirty = true;
+    // One player action that changes tiles (an opening, a chord that opens
+    // something, placing a flag) is one turn: every linked base produces once,
+    // with the network as it stood before the action (no forced rebuild: that
+    // costs a full path search per action; new bases pay from the next turn).
+    if (this.turnPending) {
+      this.turnPending = false;
+      this._bases.turn();
+      this.events.emit('econ', this.econ);
+    }
+    // Fog first, so the renderer lifts it before the opened cells fade in.
+    this.flushFog();
     if (this.changed.length) {
       const list = this.changed;
       this.changed = [];
@@ -683,7 +812,7 @@ export class Game {
    * §9.2, see CLAUDE.md "Settlement batches").
    */
   private settle(batch: number[]): void {
-    const correct: Array<{ key: number; density: number }> = [];
+    const correct: Array<{ key: number; density: number; mult: number }> = [];
     const wrong: number[] = [];
     let ax = 0;
     let ay = 0;
@@ -694,7 +823,7 @@ export class Game {
       ay += y;
       // Truth is stable without an override; the resulting board state encodes it.
       const t = this.world.truth(x, y);
-      if (t === 1) correct.push({ key: k, density: this.world.density(x, y) });
+      if (t === 1) correct.push({ key: k, density: this.world.density(x, y), mult: this.tierValueMult(x, y) });
       else wrong.push(k);
     }
     const tainted = wrong.length > 0;
@@ -731,6 +860,20 @@ export class Game {
     this._bases.recompute(this.mainBaseKey());
     this.events.emit('bases', this._bases);
     for (const f of this._bases.formed) this.events.emit('grand', f);
+    this.updateFog();
+  }
+
+  /** Register new disc sources (the main base, new bases); they see at once. */
+  private updateFog(): void {
+    if (!this.cfg.fog.enabled || !this.world.started) return;
+    this.fog.update(this.mainBaseKey(), this.econ.owned.keys());
+    if (this.inAction === 0) this.flushFog();
+  }
+
+  /** Emit the cells the fog lifted from since the last flush. */
+  private flushFog(): void {
+    const lifted = this.fog.take();
+    if (lifted.length) this.events.emit('fog', lifted);
   }
 
   private pushLog(kind: LogKind, x: number | undefined, y: number | undefined, data: Record<string, unknown>): void {
@@ -763,6 +906,8 @@ export class Game {
       econ: this.econ.snapshot(),
       upgrades: this.upgrades.snapshot(),
       bases,
+      questions: [...this.questions],
+      deferred: [...this.deferred],
       drones: this.drones.snapshot(),
       droneLoadout: structuredClone(this.droneLoadout),
       log: this.log.slice(-LOG_LIMIT),
@@ -773,8 +918,13 @@ export class Game {
   }
 
   static fromSave(data: SaveData): Game {
-    // Base and blast tuning always come from the current defaults (older saves carry retired values).
-    const g = new Game(makeConfig({ ...data.cfg, bases: undefined, blast: undefined }));
+    // Base, blast and fog tuning always come from the current defaults (older saves carry retired values).
+    // Saves from before terrain carry no `terrainEnabled`: keep them wall-free (their rivers stay mine bands).
+    // Saves from before start-relative maps keep their absolute noise. Tier tuning comes from the current defaults.
+    const world = { ...data.cfg.world, terrainEnabled: data.cfg.world.terrainEnabled ?? false, startRelative: data.cfg.world.startRelative ?? false };
+    const g = new Game(
+      makeConfig({ ...data.cfg, world, bases: undefined, blast: undefined, fog: { enabled: data.cfg.fog?.enabled ?? true }, tiers: { enabled: data.cfg.tiers?.enabled ?? true } }),
+    );
     g.time = data.time;
     for (const [k, v] of data.world.overrides) g.world.overrides.set(k, v);
     for (const [k, v] of data.world.chunkPressure) g.world.chunkPressure.set(k, v);
@@ -792,7 +942,12 @@ export class Game {
     g.upgrades.restore(data.upgrades);
     g.applyUpgrades();
     g._bases.restore(data.bases);
+    for (const k of data.questions ?? []) if (g.board.get(keyX(k), keyY(k)) === CellState.Unknown) g.questions.add(k);
+    for (const k of data.deferred ?? []) g.deferred.add(k);
+    // Fog is not saved: every opened cell sees around itself again, bases through syncBases.
+    if (g.cfg.fog.enabled) g.board.forEachCell((x, y, s) => void (isRevealed(s) && g.fog.opened(x, y)));
     g.syncBases();
+    g.fog.take();
     // Drones exist only with equipment; older saves' upgrade-bought drones are dropped.
     if (data.droneLoadout?.count) {
       g.droneLoadout = structuredClone(data.droneLoadout);
