@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+packages/electron/dist/
+*.tsbuildinfo
+
+# Tooling caches / test output
+.vite/
+coverage/
+.cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment / local overrides
+.env
+.env.*
+*.local
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Screenshots (manual and electron --screenshot output)
+/*.png
+packages/electron/*.png

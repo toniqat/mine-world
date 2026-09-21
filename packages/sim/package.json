@@ -1,0 +1,16 @@
+{
+  "name": "@mine/sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sim": "tsx src/run.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mine/core": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

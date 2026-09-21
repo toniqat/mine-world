@@ -1,0 +1,22 @@
+{
+  "name": "mine-world",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm -w @mine/web run dev",
+    "build": "npm -w @mine/web run build",
+    "preview": "npm -w @mine/web run preview",
+    "test": "npm -w @mine/core run test",
+    "typecheck": "npm -w @mine/core run typecheck && npm -w @mine/web run typecheck && npm -w @mine/sim run typecheck",
+    "sim": "npm -w @mine/sim run sim",
+    "electron:dev": "npm -w @mine/electron run dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}
