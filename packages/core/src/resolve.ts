@@ -1,4 +1,4 @@
-import { CellState, isKnownMine, isRevealed } from './board';
+import { CellState, isKnownMine, isRevealed, isWall } from './board';
 import type { GameConfig } from './config';
 import { collectComponent, type CspContext } from './csp';
 import { cellKey, forEachNeighbor, keyX, keyY } from './key';
@@ -33,7 +33,8 @@ export interface ResolveOutcome {
 
 const KEEP = (truth: 0 | 1): ResolveOutcome => ({ truth, intervened: false, movedMines: 0 });
 
-export function resolveReveal(d: ResolveDeps, x: number, y: number): ResolveOutcome {
+/** `rescue` false: never intervene (a chord trusts the player's flags, so a wrong one lets the mine go off). */
+export function resolveReveal(d: ResolveDeps, x: number, y: number, rescue = true): ResolveOutcome {
   const { world, board } = d.ctx;
   const key = cellKey(x, y);
   const committed = world.committed(key);
@@ -44,7 +45,7 @@ export function resolveReveal(d: ResolveDeps, x: number, y: number): ResolveOutc
   if (base === 0) return KEEP(0);
 
   const mode = d.cfg.resolve.interventionMode;
-  if (mode === 'STRICT') {
+  if (mode === 'STRICT' || !rescue) {
     world.commit(key, 1);
     return KEEP(1);
   }
@@ -127,16 +128,20 @@ export function resolveReveal(d: ResolveDeps, x: number, y: number): ResolveOutc
 /**
  * FAIR policy (§5.2): intervene only if the safe unknown region adjacent to
  * the cell is enclosed (flood fill stays below `escapeCap`). An open region
- * means the player could have approached from elsewhere.
+ * means the player could have approached from elsewhere. A region that touches
+ * a terrain wall is never rescued: guesses pinned against walls are the point
+ * of terrain (the player pays for information instead).
  */
 export function fairShouldIntervene(d: ResolveDeps, x: number, y: number): boolean {
   const { board, world } = d.ctx;
   const cap = d.cfg.resolve.escapeCap;
   const visited = new Set<number>();
   const queue: number[] = [];
+  let walled = false;
   const passable = (px: number, py: number): boolean => {
     const s = board.get(px, py);
-    if (isRevealed(s) || isKnownMine(s)) return false;
+    if (isWall(s)) walled = true;
+    if (isRevealed(s) || isKnownMine(s) || isWall(s)) return false;
     return world.truth(px, py) === 0;
   };
   forEachNeighbor(x, y, (nx, ny) => {
@@ -147,7 +152,7 @@ export function fairShouldIntervene(d: ResolveDeps, x: number, y: number): boole
     }
   });
   while (queue.length) {
-    if (visited.size >= cap) return false;
+    if (walled || visited.size >= cap) return false;
     const k = queue.pop()!;
     forEachNeighbor(keyX(k), keyY(k), (nx, ny) => {
       const nk = cellKey(nx, ny);
@@ -156,5 +161,5 @@ export function fairShouldIntervene(d: ResolveDeps, x: number, y: number): boole
       queue.push(nk);
     });
   }
-  return true;
+  return !walled;
 }

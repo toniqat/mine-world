@@ -21,7 +21,7 @@ import {
 } from '../src';
 
 function uniformGame(density: number, seed = 1, mode: 'STRICT' | 'FAIR' | 'FORGIVING' = 'FAIR'): Game {
-  return new Game({ seed, world: { uniformDensity: density, riverEnabled: false }, resolve: { interventionMode: mode } } as never);
+  return new Game({ seed, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: density, terrainEnabled: false }, resolve: { interventionMode: mode } } as never);
 }
 
 /** Every revealed number must equal the count of true mines around it. */
@@ -158,17 +158,100 @@ describe('INV-2: toggling a flag leaks nothing', () => {
     const snap = () => JSON.stringify({ save: { ...g.toSave(), savedAt: 0 }, credits: g.econ.credits });
     const a = snap();
     let events = 0;
+    let econ = 0;
     g.events.on('settlement', () => events++);
-    g.events.on('econ', () => events++);
+    g.events.on('econ', () => econ++);
     g.events.on('hit', () => events++);
     g.events.on('log', () => events++);
+    // Placing a flag is a turn: the only econ change is base production, which
+    // does not depend on the flag (no bases here, so it pays nothing).
     g.toggleFlag(x, y);
     expect(g.cellState(x, y)).toBe(CellState.Flag);
     expect(events).toBe(0);
+    expect(econ).toBe(1);
     g.toggleFlag(x, y);
     expect(g.cellState(x, y)).toBe(CellState.Unknown);
     expect(events).toBe(0);
+    expect(econ).toBe(1);
     expect(snap()).toBe(a);
+  });
+});
+
+/** Revealed numbers with their Unknown neighbours, in board order. */
+function numbersWithUnknowns(g: Game): Array<{ x: number; y: number; n: number; unknown: Array<[number, number]> }> {
+  const out: Array<{ x: number; y: number; n: number; unknown: Array<[number, number]> }> = [];
+  g.board.forEachCell((x, y, s) => {
+    if (!isRevealed(s) || numberOf(s) === 0) return;
+    const unknown: Array<[number, number]> = [];
+    forEachNeighbor(x, y, (nx, ny) => void (g.cellState(nx, ny) === CellState.Unknown && unknown.push([nx, ny])));
+    if (unknown.length) out.push({ x, y, n: numberOf(s), unknown });
+  });
+  return out;
+}
+
+describe('only openings settle', () => {
+  it('flags that seal their numbers wait for the next opening, anywhere', () => {
+    const g = uniformGame(0.2, 5);
+    g.reveal(0, 0);
+    let checked = 0;
+    for (const c of numbersWithUnknowns(g)) {
+      // Flag every Unknown mine next to the number; count only cases where the next opening settles them.
+      const mines = c.unknown.filter(([x, y]) => g.world.truth(x, y) === 1);
+      if (!mines.length) continue;
+      const trial = Game.fromSave(structuredClone(g.toSave()));
+      for (const [x, y] of mines) trial.toggleFlag(x, y);
+      const owned = trial.econ.owned.size;
+      let settled = 0;
+      trial.events.on('settlement', () => settled++);
+      for (const [x, y] of mines) trial.toggleFlag(x, y), trial.toggleFlag(x, y);
+      expect(settled).toBe(0);
+      expect(trial.econ.owned.size).toBe(owned);
+      for (const [x, y] of mines) expect(trial.cellState(x, y)).toBe(CellState.Flag);
+      // A far safe opening settles whatever became settle-able; it survives a save in between.
+      const back = Game.fromSave(structuredClone(trial.toSave()));
+      let far: [number, number] | null = null;
+      for (const d of numbersWithUnknowns(back).reverse()) {
+        const safe = d.unknown.find(([x, y]) => back.world.truth(x, y) === 0 && Math.hypot(x - c.x, y - c.y) > 6);
+        if (safe) (far = safe);
+        if (far) break;
+      }
+      if (!far) continue;
+      back.reveal(far[0], far[1]);
+      if (back.econ.owned.size > owned) {
+        expect(mines.some(([x, y]) => back.cellState(x, y) !== CellState.Flag)).toBe(true);
+        checked++;
+      }
+      if (checked >= 3) break;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it('a chord is never rescued: a wrong flag lets the mine go off', () => {
+    let checked = 0;
+    for (let seed = 1; seed <= 20 && checked < 3; seed++) {
+      const g = uniformGame(0.2, seed, 'FORGIVING');
+      g.reveal(0, 0);
+      for (const c of numbersWithUnknowns(g)) {
+        const mine = c.unknown.find(([x, y]) => g.world.truth(x, y) === 1);
+        const safe = c.unknown.filter(([x, y]) => g.world.truth(x, y) === 0);
+        // A 1 with one mine and at least one safe cell: flag a safe cell (wrong), chord.
+        if (c.n !== 1 || !mine || !safe.length) continue;
+        let known = 0;
+        forEachNeighbor(c.x, c.y, (nx, ny) => void (g.cellState(nx, ny) === CellState.Owned && known++));
+        if (known) continue;
+        // Opened directly, FORGIVING would move this mine away.
+        const direct = Game.fromSave(structuredClone(g.toSave()));
+        if (!direct.reveal(mine[0], mine[1]).intervened) continue;
+        const chorded = Game.fromSave(structuredClone(g.toSave()));
+        chorded.toggleFlag(safe[0][0], safe[0][1]);
+        const r = chorded.chord(c.x, c.y);
+        expect(r.hit).toBe(true);
+        expect(chorded.cellState(mine[0], mine[1])).toBe(CellState.Exploded);
+        checked++;
+        break;
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
   });
 });
 
@@ -216,7 +299,7 @@ describe('consistency invariant (T-SETTLE generalised)', () => {
 
 describe('T-SEAL: active constraints scale with perimeter, not area', () => {
   it('a fully opened disc has zero active constraints inside', () => {
-    const g = new Game({ seed: 9, world: { uniformDensity: 0, startSafeRadius: 3, riverEnabled: false }, play: { cascadeRadius: 12, cascadeCap: 100000 } } as never);
+    const g = new Game({ seed: 9, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: 0, startSafeRadius: 3, terrainEnabled: false }, play: { cascadeRadius: 12, cascadeCap: 100000 } } as never);
     g.reveal(0, 0);
     const revealed = g.board.revealedCount;
     expect(revealed).toBeGreaterThan(400);
@@ -366,14 +449,14 @@ describe('save / load', () => {
     const g = uniformGame(0.2, 77);
     playRandom(g, 30, mulberry(77), 0.1);
     g.econ.credits = 5000;
-    g.buy('transport_speed');
+    g.buy('streak_cap');
     g.equipDrones({ count: 1, tiers: { t1Open: true } });
     const data = g.toSave();
     const g2 = Game.fromSave(structuredClone(data));
     expect(g2.board.revealedCount).toBe(g.board.revealedCount);
     expect(g2.board.flagCount).toBe(g.board.flagCount);
     expect(g2.world.overrides.size).toBe(g.world.overrides.size);
-    expect(g2.upgrades.level('transport_speed')).toBe(1);
+    expect(g2.upgrades.level('streak_cap')).toBe(1);
     expect(g2.droneLoadout.count).toBe(1);
     expect(g2.drones.drones.length).toBe(1);
     expect(g2.econ.credits).toBeCloseTo(g.econ.credits, 6);

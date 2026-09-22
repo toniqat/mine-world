@@ -241,6 +241,14 @@ export class App {
         this.view.grand(f.members, f.cx, f.cy, t('fx.grand', { m: mult }), PALETTES[resolveTheme(this.settings.theme)].accent);
         if (!demo) this.toasts.show(t('toast.grand', { n: f.members.length, m: mult }), 'good', 4000);
       }),
+      on('fog', (keys) => {
+        this.view.liftFog(keys);
+        this.dirty = true;
+      }),
+      on('tech', (tier) => {
+        this.view.refreshAll();
+        this.toasts.show(t('toast.tech', { t: tier }), 'good');
+      }),
       on('scanners', (list) => this.view.setScanners(list)),
       on('drones', () => this.syncDrones(g)),
       on('bases', () => {
@@ -279,28 +287,50 @@ export class App {
   private onPrimary(c: { x: number; y: number }): void {
     if (this.game.baseInfo(c.x, c.y)) return this.selectBase(cellKey(c.x, c.y));
     const s = this.game.cellState(c.x, c.y);
-    if (isRevealed(s)) return this.chord(c);
+    if (isRevealed(s)) return this.chordAt(c);
+    if (this.lockedToast(c)) return;
     if (this.settings.inputMode === 'toggle' && this.flagMode) {
-      this.game.toggleFlag(c.x, c.y);
+      this.game.cycleMark(c.x, c.y);
       return;
     }
     if (s === CellState.Unknown) this.game.reveal(c.x, c.y);
   }
 
-  private onSecondary(c: { x: number; y: number }): void {
-    const s = this.game.cellState(c.x, c.y);
-    if (isRevealed(s)) this.chord(c);
-    else this.game.toggleFlag(c.x, c.y);
-  }
-
-  /** Chording opens the neighbours in one ripple from the number, not one per neighbour. */
-  private chord(c: { x: number; y: number }): void {
+  /**
+   * Chord a number: its neighbours open in one ripple from the number, not one per
+   * neighbour; the closed ones it could open (not fogged or locked) that stay closed look pressed.
+   */
+  private chordAt(c: { x: number; y: number }): void {
     this.view.rippleFrom = cellKey(c.x, c.y);
     try {
       this.game.chord(c.x, c.y);
     } finally {
       this.view.rippleFrom = null;
     }
+    const keys: number[] = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const x = c.x + dx, y = c.y + dy;
+        if (this.game.cellState(x, y) === CellState.Unknown && !this.game.fogged(x, y) && !this.game.locked(x, y)) keys.push(cellKey(x, y));
+      }
+    }
+    if (keys.length) this.view.press(keys);
+  }
+
+  /** A closed, visible cell of a tier not learned yet: say which technology it needs. */
+  private lockedToast(c: { x: number; y: number }): boolean {
+    const s = this.game.cellState(c.x, c.y);
+    if ((s !== CellState.Unknown && s !== CellState.Flag) || this.game.fogged(c.x, c.y) || !this.game.locked(c.x, c.y)) return false;
+    this.toasts.show(t('toast.locked', { t: this.game.tierAt(c.x, c.y), l: this.game.tierAt(c.x, c.y) - 1 }), 'bad');
+    return true;
+  }
+
+  private onSecondary(c: { x: number; y: number }): void {
+    const s = this.game.cellState(c.x, c.y);
+    if (this.lockedToast(c)) return;
+    if (isRevealed(s)) this.chordAt(c);
+    // Unknown -> flag -> "?" -> Unknown.
+    else this.game.cycleMark(c.x, c.y);
   }
 
   /** Pressing on a placed drone picks it up; it pauses until dropped. */
@@ -336,7 +366,8 @@ export class App {
     this.view.setHover(c);
     if (c) {
       const d = this.game.densityAt(c.x, c.y);
-      this.hud.setCoords(`(${c.x}, ${c.y}) · ${t('status.density')} ${pct(d)}${this.settings.showDensity ? ` · ${fmt(this.game.mineValueAt(c.x, c.y))}` : ''}`);
+      const tier = this.game.cfg.tiers.enabled && this.game.world.started ? ` · ${t('status.tier')} ${this.game.tierAt(c.x, c.y)}` : '';
+      this.hud.setCoords(`(${c.x}, ${c.y})${tier} · ${t('status.density')} ${pct(d)}${this.settings.showDensity ? ` · ${fmt(this.game.mineValueAt(c.x, c.y))}` : ''}`);
     } else this.hud.setCoords('');
   }
 
@@ -454,7 +485,7 @@ export class App {
     void this.save(true);
   }
 
-  /** A fresh world is all Unknown until the player opens a cell; the view starts on the start cell. */
+  /** A fresh world is all fog until the first click places the main base (`syncHint` asks for it); the view starts on the start cell. */
   private centerOnStart(): void {
     const s = this.game.startCell();
     this.cam.centerOnCell(s.x, s.y);

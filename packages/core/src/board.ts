@@ -10,6 +10,9 @@ export const CellState = {
   Exploded: 3,
   /** A real mine whose claim batch contained a wrong flag: forfeited, no income. */
   Lost: 4,
+  /** Terrain walls: no tile, never a mine, no number. Never stored; `Board.terrain` supplies them. */
+  Mountain: 5,
+  Water: 6,
   RevealedBase: 16,
 } as const;
 
@@ -21,6 +24,9 @@ export function numberOf(s: number): number {
 }
 export function isKnownMine(s: number): boolean {
   return s === CellState.Owned || s === CellState.Exploded || s === CellState.Lost;
+}
+export function isWall(s: number): boolean {
+  return s === CellState.Mountain || s === CellState.Water;
 }
 export function revealedState(n: number): number {
   return CellState.RevealedBase + n;
@@ -37,11 +43,13 @@ export class Board {
   maxX = 0;
   maxY = 0;
   private touched = false;
+  /** Terrain lookup (World.terrain): the state of a cell nothing was stored in. */
+  terrain: ((x: number, y: number) => number) | null = null;
 
   get(x: number, y: number): number {
     const c = this.chunks.get(cellKey(x >> 4, y >> 4));
-    if (!c) return 0;
-    return c[((y & 15) << 4) | (x & 15)];
+    const s = c ? c[((y & 15) << 4) | (x & 15)] : 0;
+    return s === 0 && this.terrain ? this.terrain(x, y) : s;
   }
 
   set(x: number, y: number, s: number): void {
@@ -106,6 +114,7 @@ export class Board {
     b.maxX = this.maxX;
     b.maxY = this.maxY;
     b.touched = this.touched;
+    b.terrain = this.terrain;
     return b;
   }
 

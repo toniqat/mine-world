@@ -24,8 +24,12 @@ export interface SaveData {
   nextScannerId: number;
   econ: EconSnapshot;
   upgrades: [string, number][];
-  /** Main-base level and undelivered goods; absent in older saves (level 1). */
+  /** Main-base level (older saves also carry undelivered goods); absent in the oldest saves (level 1). */
   bases?: BasesSnapshot;
+  /** Cells marked "?" (keys); absent in older saves. Fog is not saved: it follows from the bases' deliveries. */
+  questions?: number[];
+  /** Cells whose flags changed since the last opening (they settle on the next one); absent in older saves. */
+  deferred?: number[];
   drones: DroneState[];
   /** Drone equipment; absent in older saves (no drones). */
   droneLoadout?: DroneLoadout;

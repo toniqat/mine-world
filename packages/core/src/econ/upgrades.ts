@@ -1,13 +1,14 @@
 /**
  * Upgrade tree (spec §8, cut down 2026-09-21). For now the game keeps only
- * the basic incremental axes: shipment speed and the streak cap here, and
- * production through the main-base level (econ/bases.ts). Solver tiers,
+ * the basic incremental axes: the streak cap here, and
+ * production through the main-base level (econ/bases.ts), plus the mining
+ * technology (`tech`: one levelled upgrade, level n opens tier n + 1). Solver tiers,
  * drones and consumables are no longer sold; drones stay in core for the
  * planned equipment items (see `Game.equipDrones`).
  *
  * Costs: TODO(play).
  */
-export type UpgradeGroup = 'network' | 'misc';
+export type UpgradeGroup = 'misc' | 'tech';
 
 export interface UpgradeDef {
   id: string;
@@ -16,12 +17,17 @@ export interface UpgradeDef {
   maxLevel: number;
   baseCost: number;
   growth: number;
+  /** Explicit price per level (index = current level); overrides baseCost x growth^level. */
+  costs?: number[];
   requires?: string;
 }
 
 export const UPGRADES: UpgradeDef[] = [
-  { id: 'transport_speed', group: 'network', maxLevel: 20, baseCost: 80, growth: 1.7 },
   { id: 'streak_cap', group: 'misc', maxLevel: 5, baseCost: 500, growth: 2.5 },
+  // Mining technology: level n opens tier n + 1 (config.tiers). Each level costs ~60 % of the
+  // settlement value of every mine in the tier it follows (sim: tiers 1-4 hold ~17k / 108k /
+  // 663k / 1.77M at streak x1), so clearing most of a tier buys the next one. TODO(play)
+  { id: 'mining', group: 'tech', maxLevel: 4, baseCost: 10_000, growth: 1, costs: [10_000, 65_000, 400_000, 1_050_000] },
 ];
 
 const BY_ID = new Map(UPGRADES.map((u) => [u.id, u]));
@@ -45,7 +51,9 @@ export class Upgrades {
 
   cost(id: string): number {
     const d = upgradeDef(id);
-    return Math.round(d.baseCost * Math.pow(d.growth, this.level(id)));
+    const l = this.level(id);
+    if (d.costs) return d.costs[Math.min(d.costs.length - 1, l)];
+    return Math.round(d.baseCost * Math.pow(d.growth, l));
   }
 
   /** Reason the upgrade cannot be bought, or null when it can (ignoring money). */
@@ -66,9 +74,13 @@ export class Upgrades {
     return [...this.levels.entries()];
   }
 
-  /** Upgrades no longer sold (older saves) are dropped. */
+  /** Upgrades no longer sold (older saves) are dropped; the old one-shot `mining_t<n>` become `mining` level n - 1. */
   restore(entries: [string, number][]): void {
     this.levels.clear();
-    for (const [k, v] of entries) if (BY_ID.has(k)) this.levels.set(k, v);
+    for (const [k, v] of entries) {
+      const old = /^mining_t(\d+)$/.exec(k);
+      if (old && v > 0) this.levels.set('mining', Math.max(this.level('mining'), Number(old[1]) - 1));
+      else if (BY_ID.has(k)) this.levels.set(k, v);
+    }
   }
 }

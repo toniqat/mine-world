@@ -1,4 +1,5 @@
 import type { WorldConfig } from './config';
+import { CellState } from './board';
 import { clamp, fbm, hash01 } from './hash';
 import { cellKey } from './key';
 
@@ -27,6 +28,8 @@ export class World {
   started = false;
 
   static readonly CHUNK = 16;
+  /** Terrain per 16x16 chunk (CellState.Mountain / Water / 0), filled lazily once the start is set. */
+  private readonly terrainChunks = new Map<number, Uint8Array>();
 
   constructor(public cfg: WorldConfig, public seed: number) {}
 
@@ -38,20 +41,31 @@ export class World {
     this.started = true;
   }
 
+  /**
+   * Coordinates the noise and hashes read: relative to the start cell when
+   * `startRelative`, so the map does not depend on where the main base went.
+   */
+  private nx(x: number): number {
+    return this.cfg.startRelative ? x - this.startX : x;
+  }
+  private ny(y: number): number {
+    return this.cfg.startRelative ? y - this.startY : y;
+  }
+
   /** Prior mine density at a cell (§3.1 / §3.3). */
   density(x: number, y: number): number {
     const w = this.cfg;
     const r = Math.hypot(x - this.startX, y - this.startY);
     if (r < w.startSafeRadius) return 0;
     if (w.uniformDensity !== null) return w.uniformDensity;
-    let n = fbm(this.seed, x, y, w.biomeNoiseScale, w.biomeOctaves);
+    let n = fbm(this.seed, this.nx(x), this.ny(y), w.biomeNoiseScale, w.biomeOctaves);
     n = clamp((n - 0.5) * w.biomeContrast + 0.5, 0, 1);
     let d = w.densityMin + (w.densityMax - w.densityMin) * n;
     d += Math.min(w.distanceRampCap, w.distanceRamp * r);
     d = clamp(d, w.densityMin, w.densityMax);
-    if (w.riverEnabled && r > w.riverMinRadius) {
+    if (w.riverEnabled && r > (w.riverMinRadius ?? 60)) {
       const rv = fbm(this.seed ^ 0x5bd1e995, x, y, w.riverNoiseScale, 2);
-      if (Math.abs(rv - 0.5) < w.riverWidth) d = w.riverDensity;
+      if (Math.abs(rv - 0.5) < w.riverWidth) d = w.riverDensity ?? 0.9;
     }
     const fadeR = w.startSafeRadius * 3;
     if (r < fadeR) d *= (r - w.startSafeRadius) / (fadeR - w.startSafeRadius);
@@ -59,7 +73,36 @@ export class World {
   }
 
   isMineBase(x: number, y: number): boolean {
-    return hash01(this.seed, x, y) < this.density(x, y);
+    return hash01(this.seed, this.nx(x), this.ny(y)) < this.density(x, y);
+  }
+
+  /**
+   * Terrain wall at a cell (CellState.Mountain / Water), or 0. Stateless from the
+   * seed and the start cell; nothing before the start is set, nothing near it.
+   */
+  terrain(x: number, y: number): number {
+    if (!this.cfg.terrainEnabled || !this.started) return 0;
+    const ck = cellKey(x >> 4, y >> 4);
+    let c = this.terrainChunks.get(ck);
+    if (!c) {
+      c = new Uint8Array(World.CHUNK * World.CHUNK);
+      const bx = (x >> 4) * World.CHUNK;
+      const by = (y >> 4) * World.CHUNK;
+      for (let i = 0; i < c.length; i++) c[i] = this.terrainAt(bx + (i & 15), by + (i >> 4));
+      this.terrainChunks.set(ck, c);
+    }
+    return c[((y & 15) << 4) | (x & 15)];
+  }
+
+  private terrainAt(ax: number, ay: number): number {
+    const w = this.cfg;
+    if (Math.hypot(ax - this.startX, ay - this.startY) < w.terrainMinRadius) return 0;
+    const x = this.nx(ax);
+    const y = this.ny(ay);
+    if (fbm(this.seed ^ 0x2f6b1d3a, x, y, w.mountainNoiseScale, 3) > w.mountainThreshold) return CellState.Mountain;
+    const rv = fbm(this.seed ^ 0x5bd1e995, x, y, w.riverNoiseScale, 2);
+    if (Math.abs(rv - 0.5) < w.riverWidth && fbm(this.seed ^ 0x6c8e9cf5, x, y, w.fordNoiseScale, 1) >= w.fordThreshold) return CellState.Water;
+    return 0;
   }
 
   committed(key: number): 0 | 1 | undefined {
@@ -100,10 +143,11 @@ export class World {
    */
   truth(x: number, y: number): 0 | 1 {
     this.started = true;
+    if (this.terrain(x, y)) return 0;
     const ov = this.overrides.get(cellKey(x, y));
     if (ov !== undefined) return ov;
     const d = this.density(x, y);
-    const h = hash01(this.seed, x, y);
+    const h = hash01(this.seed, this.nx(x), this.ny(y));
     if (h < d) return 1;
     const p = this.pressureFor(x, y);
     return p > 0 && h < d * (1 + p) ? 1 : 0;

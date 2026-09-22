@@ -30,7 +30,8 @@ export class DemoPlayer {
   }
 
   private static world(seed: number): Game {
-    return new Game({ seed } as never);
+    // No mining tiers: the bot would stall at the first locked ring.
+    return new Game({ seed, tiers: { enabled: false } } as never);
   }
 
   /** True when the demo started over this call (the caller rebinds the view). */
@@ -92,7 +93,7 @@ export class DemoPlayer {
     let pick: number | null = null;
     let best = Infinity;
     for (const [k, p] of this.lastOdds) {
-      if (g.cellState(keyX(k), keyY(k)) !== CellState.Unknown) continue;
+      if (g.cellState(keyX(k), keyY(k)) !== CellState.Unknown || g.fogged(keyX(k), keyY(k))) continue;
       const score = p + 0.004 * Math.hypot(keyX(k) - this.focus.x, keyY(k) - this.focus.y);
       if (score < best) (best = score), (pick = k);
     }
