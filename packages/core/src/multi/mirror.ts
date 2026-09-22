@@ -18,6 +18,9 @@ const NOTHING: RevealResult = { hit: false, revealed: 0, intervened: false };
  *
  * `world.started` means "my main base exists" (the start hint, `H`), and the
  * world's start cell is my main base.
+ *
+ * Once the session is complete (`final`) the board is frozen: nothing can be
+ * opened, chorded, flagged or marked any more, but it can still be looked at.
  */
 export class MirrorGame extends Game {
   readonly owners: OwnerLayer;
@@ -26,6 +29,10 @@ export class MirrorGame extends Game {
   /** My signature colour index. */
   readonly me: number;
   players: PlayerInfo[] = [];
+  /** Share of the land opened, as the server last said. */
+  unlock: number;
+  /** Final standings once the session is complete, else null. */
+  final: PlayerInfo[] | null;
   send: (m: ClientMsg) => void = () => {};
 
   constructor(w: WelcomeMsg) {
@@ -34,6 +41,8 @@ export class MirrorGame extends Game {
     this.token = w.token;
     this.session = w.session;
     this.me = w.you;
+    this.unlock = w.unlock;
+    this.final = w.final;
     for (const [ck, states, owners] of w.chunks) {
       this.board.chunks.set(ck, base64Decode(states));
       const o = base64Decode(owners);
@@ -97,6 +106,7 @@ export class MirrorGame extends Game {
   }
 
   override reveal(x: number, y: number): RevealResult {
+    if (this.final) return NOTHING;
     x = this.wx(x);
     const s = this.board.get(x, y);
     if (s !== CellState.Unknown) return NOTHING;
@@ -105,6 +115,7 @@ export class MirrorGame extends Game {
   }
 
   override chord(x: number, y: number): RevealResult {
+    if (this.final) return NOTHING;
     x = this.wx(x);
     const s = this.board.get(x, y);
     if (!isRevealed(s)) return NOTHING;
@@ -119,9 +130,13 @@ export class MirrorGame extends Game {
     return NOTHING;
   }
 
+  override cycleMark(x: number, y: number): void {
+    if (!this.final) super.cycleMark(x, y);
+  }
+
   /** Flags need a main base (the server ignores them before it). */
   override setFlag(x: number, y: number, on: boolean, actor: Actor = PLAYER): void {
-    if (!this.world.started) return;
+    if (!this.world.started || this.final) return;
     x = this.wx(x);
     const before = this.board.get(x, y);
     super.setFlag(x, y, on, actor);

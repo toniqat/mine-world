@@ -15,6 +15,7 @@ import { LockedBubble, RepairBubble } from './ui/bubble';
 import { Hud, type PanelName } from './ui/hud';
 import { Panels } from './ui/panels';
 import { StartHint, TITLE_LEAVE_MS, TitleScreen, ViewHint } from './ui/title';
+import { standingsDialog } from './ui/standings';
 import { Toasts, confirmDialog, messageDialog } from './ui/toast';
 
 /** The demo board behind the title fades out over this long once Start is pressed. */
@@ -147,6 +148,8 @@ export class App {
       toggleMainBase: () => this.toggleMain(),
       toggleFlagMode: () => this.setFlagMode(!this.flagMode),
       gotoPlayer: (color) => this.gotoPlayer(color),
+      showStandings: () => void this.showStandings(),
+      nextSession: () => void this.nextSession(),
     });
     this.panels = new Panels(document.getElementById('panel')!, {
       buy: (id) => this.buy(id),
@@ -239,6 +242,11 @@ export class App {
   /** Earth mode zoomed out past `VIEW_ONLY_ZOOM`: tiles cannot be acted on. */
   private viewOnly(): boolean {
     return this.game.wrap > 0 && this.cam.zoom < VIEW_ONLY_ZOOM;
+  }
+
+  /** Online, a complete session: the world can be looked at, not played. */
+  private frozen(): boolean {
+    return this.game instanceof MirrorGame && this.game.final !== null;
   }
 
   /** Board coordinates from the input, with the column made canonical (Earth mode wraps). */
@@ -365,13 +373,13 @@ export class App {
     this.cam.zoom = 1;
     this.centerOnStart();
     this.constrainCamera();
-    const g = this.game;
-    if (g instanceof MirrorGame) this.toasts.show(t('net.joined', { c: t(`color.${g.me}` as StringKey) }), 'info', 4000);
     await wait(this.view.intro());
     this.appEl.classList.remove('intro');
     this.input.enabled = true;
     this.syncHint();
     if (fresh && !earth) void this.save(true);
+    // Rejoined a session that was completed meanwhile: its standings.
+    if (this.game instanceof MirrorGame && this.game.final) this.finishSession(this.game);
   }
 
   // ---------------------------------------------------------------- online
@@ -393,6 +401,11 @@ export class App {
     switch (m.t) {
       case 'cells':
         g.applyCells(m.cells);
+        g.unlock = m.unlock;
+        break;
+      case 'finished':
+        g.final = m.players;
+        this.finishSession(g);
         break;
       case 'players':
         g.setPlayers(m.players);
@@ -450,6 +463,7 @@ export class App {
         if (!g.world.started) this.centerOnStart();
         this.syncHint();
         this.toasts.show(t('net.back'), 'good');
+        if (g.final) this.finishSession(g);
       } catch (e) {
         if (e instanceof ConnectError && e.code === 'version') return void this.toasts.show(t('net.version'), 'bad', 8000);
         this.reconnect(Math.min(RECONNECT_MAX_MS, delay * 2));
@@ -476,9 +490,64 @@ export class App {
     this.openTitle();
   }
 
+  /**
+   * The session is complete: the board is frozen, so the connection and the
+   * kept seat go (the title's multi button joins a new session), and the
+   * standings come up. Close keeps the frozen world to look around in (the
+   * top-left capsule brings the standings back); Next session joins another.
+   */
+  private finishSession(g: MirrorGame): void {
+    saveToken(null);
+    clearTimeout(this.reconnectTimer);
+    this.net?.close();
+    this.net = null;
+    this.togglePanel(null);
+    this.view.setHover(null);
+    this.hint?.hide();
+    this.hint = null;
+    void this.showStandings();
+  }
+
+  private async showStandings(): Promise<void> {
+    const g = this.game;
+    if (!(g instanceof MirrorGame) || !g.final) return;
+    const modal = document.getElementById('modal')!;
+    if (!modal.hidden) return;
+    if ((await standingsDialog(modal, g.final, g.me)) === 'next') await this.nextSession();
+  }
+
+  /** From a complete session: join another one and let it appear like a new world. */
+  private async nextSession(): Promise<void> {
+    if (this.connecting || !(this.game instanceof MirrorGame) || !this.game.final) return;
+    this.connecting = true;
+    let res: { net: NetClient; welcome: WelcomeMsg };
+    try {
+      res = await NetClient.connect(serverUrl(), null);
+    } catch (e) {
+      this.toasts.show(this.netError(e), 'bad', 5000);
+      return;
+    } finally {
+      this.connecting = false;
+    }
+    const g = this.goOnline(res.net, res.welcome);
+    this.game = g;
+    this.input.enabled = false;
+    this.view.setGame(g);
+    this.applyPalette();
+    this.bindGame(g);
+    this.cam.zoom = 1;
+    this.centerOnStart();
+    this.constrainCamera();
+    this.appEl.classList.add('intro');
+    await wait(this.view.intro());
+    this.appEl.classList.remove('intro');
+    this.input.enabled = true;
+    this.syncHint();
+  }
+
   /** A world nobody has opened yet asks for the first click (it founds the main base). */
   private syncHint(): void {
-    const want = !this.demo && !this.game.world.started;
+    const want = !this.demo && !this.game.world.started && !this.frozen();
     if (want && !this.hint) this.hint = new StartHint(this.appEl, this.game.wrap > 0);
     else if (!want && this.hint) {
       this.hint.hide();
@@ -591,7 +660,7 @@ export class App {
 
   private onPrimary(raw: { x: number; y: number }): void {
     if (this.swallowPrimary) return void (this.swallowPrimary = false);
-    if (this.viewOnly()) return;
+    if (this.viewOnly() || this.frozen()) return;
     const c = this.canon(raw);
     if (!this.game.online && this.game.baseInfo(c.x, c.y)) return this.selectBase(cellKey(c.x, c.y));
     this.view.setSelectedBase(null);
@@ -674,7 +743,7 @@ export class App {
 
   private onSecondary(raw: { x: number; y: number }): void {
     if (this.swallowPrimary) return void (this.swallowPrimary = false);
-    if (this.viewOnly()) return;
+    if (this.viewOnly() || this.frozen()) return;
     const c = this.canon(raw);
     const s = this.game.cellState(c.x, c.y);
     if (this.lockedNotice(c)) return;
@@ -713,7 +782,7 @@ export class App {
   }
 
   private onHover(c: { x: number; y: number } | null): void {
-    this.view.setHover(c && !this.viewOnly() ? this.canon(c) : null);
+    this.view.setHover(c && !this.viewOnly() && !this.frozen() ? this.canon(c) : null);
   }
 
   private onKey(code: string, ev: KeyboardEvent): void {

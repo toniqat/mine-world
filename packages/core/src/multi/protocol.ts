@@ -26,8 +26,20 @@ export const SIGNATURE_COLORS: readonly number[] = [
 export const MULTI = {
   /** A session holds fewer than 12 players (user decision). */
   maxPlayers: 11,
-  /** New players only join sessions with less than this share of the land opened (user decision). */
-  joinMaxUnlock: 0.9,
+  /**
+   * New players only join sessions with less than this share of the land
+   * opened (user decision: 60 %). The share can drop again (a game over turns
+   * land back to Unknown), and the session is joinable again; nobody is told.
+   */
+  joinMaxUnlock: 0.6,
+  /**
+   * The session is complete once this share of the land is opened (user
+   * decision: 75 %; with ~23 % of the land mined, about all the safe land plus
+   * a few bases). Whoever leads then wins; the board is frozen.
+   */
+  endUnlock: 0.75,
+  /** From this share on the client shows the session's progress towards `endUnlock`. */
+  progressFrom: 0.7,
   /** A player offline this long leaves the session; their land stays, uncoloured (user decision: 10 min). */
   idleKickMs: 10 * 60_000,
   /**
@@ -37,7 +49,7 @@ export const MULTI = {
    */
   startRadius: 2,
   /** Wire protocol version; a client with another one is refused. */
-  version: 1,
+  version: 2,
 } as const;
 
 /**
@@ -99,14 +111,21 @@ export interface WelcomeMsg {
   chunks: Array<[number, string, string]>;
   /** Your flags (keys): flags are private. */
   flags: number[];
+  /** Share of the land opened (`Session.unlockRatio`). */
+  unlock: number;
+  /** The final standings once the session is complete, else null. */
+  final: PlayerInfo[] | null;
 }
 
 export type ServerMsg =
   | WelcomeMsg
-  | { t: 'cells'; by: number; cells: WireCells }
+  /** `unlock`: the share of the land opened after these changes. */
+  | { t: 'cells'; by: number; cells: WireCells; unlock: number }
   | { t: 'blast'; x: number; y: number; r: number; color: number }
   | { t: 'settle'; color: number; x: number; y: number; cells: number[]; correct: number; wrong: number; payout: number }
   | { t: 'players'; players: PlayerInfo[] }
   | { t: 'gameover'; score: number }
+  /** The session is complete: the final standings (by score, the winner first). */
+  | { t: 'finished'; players: PlayerInfo[] }
   | { t: 'error'; code: MultiError }
   | { t: 'pong' };

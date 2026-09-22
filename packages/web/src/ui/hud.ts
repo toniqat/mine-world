@@ -13,6 +13,10 @@ export interface HudHandlers {
   toggleFlagMode(): void;
   /** Online: a scoreboard row was clicked; the camera goes to that player's main base. */
   gotoPlayer(color: number): void;
+  /** Online, session complete: show the final standings again. */
+  showStandings(): void;
+  /** Online, session complete: join another session. */
+  nextSession(): void;
 }
 
 /** Counters move at least this many units per second... */
@@ -61,7 +65,10 @@ class Counter {
  *
  * Online (Earth multiplayer) there is no pool, combo, credits or main-base
  * panel: the top right shows my score next to the buttons (flag mode,
- * settings) and the session's scoreboard under them.
+ * settings) and the session's scoreboard under them. At the top left, from
+ * `MULTI.progressFrom` of the land opened, the session's progress with a mark
+ * where it ends (`MULTI.endUnlock`); once it is complete, a capsule that
+ * brings the standings back or joins the next session.
  */
 export class Hud {
   private credits = new Counter();
@@ -98,6 +105,12 @@ export class Hud {
   private boardEl!: HTMLElement;
   /** Scoreboard as last drawn (the mirror replaces the array on every change). */
   private shownPlayers: PlayerInfo[] | null = null;
+  private progressPill!: HTMLElement;
+  private progressEl!: HTMLElement;
+  private progressFill!: HTMLElement;
+  private donePill!: HTMLElement;
+  /** Progress as last drawn: tenths of a percent, or -1 hidden, -2 complete. */
+  private shownProgress: number | null = null;
 
   constructor(
     private hud: HTMLElement,
@@ -147,6 +160,30 @@ export class Hud {
     this.baseBtn = iconBtn('base', t('hud.mainBase'), () => this.h.toggleMainBase());
     this.boardEl = el('div', { class: 'scoreboard' });
     this.shownPlayers = null;
+    this.progressEl = el('span', { class: 'value small' }, '');
+    this.progressFill = el('div', { class: 'fill' });
+    const end = el('div', { class: 'end' });
+    end.style.left = `${MULTI.endUnlock * 100}%`;
+    this.progressPill = el(
+      'div',
+      { class: 'pill progress' },
+      el(
+        'div',
+        { class: 'stat' },
+        el('div', { class: 'amount' }, el('span', { class: 'label', text: t('progress.label') }), this.progressEl),
+        el('div', { class: 'bar' }, this.progressFill, end),
+        el('div', { class: 'warn', text: t('progress.warn', { p: Math.round(MULTI.endUnlock * 100) }) }),
+      ),
+    );
+    this.donePill = el(
+      'div',
+      { class: 'pill done' },
+      el('div', { class: 'label', text: t('done.label') }),
+      el('button', { class: 'btn small', text: t('done.standings'), onclick: () => this.h.showStandings() }),
+      el('button', { class: 'btn small primary', text: t('done.next'), onclick: () => this.h.nextSession() }),
+    );
+    this.shownProgress = null;
+    this.hud.append(el('div', { class: 'hud-left' }, this.progressPill, this.donePill));
     this.hud.append(el('div', { class: 'hud-right online' }, el('div', { class: 'hud-row' }, this.scorePill, el('div', { class: 'pill menu' }, this.flagBtn, this.settingsBtn)), this.boardEl));
     if (this.game) this.paint();
   }
@@ -258,12 +295,25 @@ export class Hud {
     }
   }
 
+  /** The session's progress from `MULTI.progressFrom` on, or the complete capsule. */
+  private paintProgress(g: MirrorGame): void {
+    const v = g.final ? -2 : g.unlock >= MULTI.progressFrom ? Math.floor(g.unlock * 1000) : -1;
+    if (v === this.shownProgress) return;
+    this.shownProgress = v;
+    this.progressPill.style.display = v >= 0 ? '' : 'none';
+    this.donePill.style.display = v === -2 ? '' : 'none';
+    if (v < 0) return;
+    this.progressEl.textContent = `${(v / 10).toFixed(1)}%`;
+    this.progressFill.style.width = `${Math.min(100, v / 10)}%`;
+  }
+
   private paint(): void {
     const g = this.game;
     if (!g) return;
     if (this.onlineMode) {
       this.scoreEl.textContent = this.score.text();
       this.paintBoard(g as MirrorGame);
+      this.paintProgress(g as MirrorGame);
       return;
     }
     const e = g.econ;

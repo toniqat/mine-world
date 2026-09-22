@@ -100,6 +100,17 @@ button { cursor: pointer; touch-action: manipulation; }
 .sb-row.jump { cursor: pointer; margin: 0 -6px; padding: 3px 6px; border-radius: 6px; }
 .sb-row.jump:hover { background: var(--hover); }
 .sb-score { font: 600 12px var(--mono); font-variant-numeric: tabular-nums; }
+/* Online, top left: the session's progress from 70 % with a mark where it ends; once complete, standings / next session. */
+.hud-left { grid-column: 1; justify-self: start; display: flex; align-items: start; gap: 10px; }
+.pill.progress { height: auto; padding: 7px 16px 6px; }
+.pill.progress .amount { gap: 8px; align-items: baseline; }
+.pill.progress .value { color: var(--warning); }
+.pill.progress .bar { position: relative; height: 3px; margin-top: 4px; border-radius: 2px; background: var(--border); min-width: 150px; }
+.pill.progress .fill { height: 100%; width: 0; border-radius: 2px; background: var(--warning); transition: width 400ms ease; }
+.pill.progress .end { position: absolute; top: -3px; width: 2px; height: 9px; margin-left: -1px; border-radius: 1px; background: var(--error); }
+.pill.progress .warn { margin-top: 3px; font-size: 11px; color: var(--fg-muted); }
+.pill.done { gap: 8px; padding: 0 6px 0 16px; }
+.pill.done .btn { height: 30px; border-radius: 15px; padding: 0 12px; }
 /* What the pool gains (or loses) floats up out of it. */
 .gain {
   position: absolute; left: 50%; top: 100%; transform: translate(-50%, 0); pointer-events: none;
@@ -231,6 +242,26 @@ button { cursor: pointer; touch-action: manipulation; }
 .modal .box .big { font: 600 26px/1.2 var(--mono); color: var(--accent); }
 .modal .box .small { margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
 .modal .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+/* Final standings: 2, 1, 3 on a podium, 4th on in a list under it. */
+.modal .box.standings { width: min(460px, 92vw); }
+.podium { display: flex; justify-content: center; align-items: flex-end; gap: 8px; margin: 14px 0 12px; }
+.st-place { flex: 0 1 32%; display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; }
+.st-dot { width: 14px; height: 14px; border-radius: 50%; }
+.st-place.p1 .st-dot { width: 20px; height: 20px; }
+.st-name { display: flex; align-items: center; max-width: 100%; white-space: nowrap; overflow: hidden; }
+.st-place.me .st-name { font-weight: 600; }
+.st-score { font: 600 13px var(--mono); font-variant-numeric: tabular-nums; }
+.st-place.p1 .st-score { font-size: 16px; color: var(--accent); }
+.st-block {
+  align-self: stretch; display: flex; align-items: flex-start; justify-content: center; margin-top: 4px; padding-top: 6px;
+  border-top: 3px solid var(--border); border-radius: 6px 6px 0 0; background: var(--hover); font: 600 15px var(--mono); color: var(--fg-muted);
+}
+.st-place.p1 .st-block { height: 72px; font-size: 20px; color: var(--fg); }
+.st-place.p2 .st-block { height: 50px; }
+.st-place.p3 .st-block { height: 34px; }
+.st-list { max-height: 30vh; overflow-y: auto; margin: 0 0 14px; padding-top: 6px; border-top: 1px solid var(--border); }
+.st-list .sb-row { grid-template-columns: 22px auto 1fr auto; }
+.st-rank { font: 12px var(--mono); color: var(--fg-muted); text-align: right; }
 
 /* --- title screen --- */
 /* While the title is up the demo board is muted, and the chrome is out of sight. */
@@ -296,6 +327,8 @@ button { cursor: pointer; touch-action: manipulation; }
   .pill.credits { min-width: 0; }
   .pill.pool .bar { min-width: 56px; }
   .hud-right.online { gap: 6px; }
+  .hud-left { grid-column: 1; grid-row: 2; }
+  .pill.progress .bar { min-width: 110px; }
   .hud-row { gap: 6px; }
   .scoreboard { min-width: 0; padding: 6px 10px 8px; font-size: 11px; }
   .panel { top: calc(56px + env(safe-area-inset-top)); right: calc(6px + env(safe-area-inset-right)); max-width: calc(100vw - 12px); max-height: calc(100dvh - 68px - env(safe-area-inset-top)); }

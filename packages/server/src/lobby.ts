@@ -39,7 +39,12 @@ export class Lobby {
     const all = (msg: ServerMsg) => this.broadcast(s, msg);
     s.events.on('cells', (e) => {
       this.dirty.add(s);
-      all({ t: 'cells', by: e.by, cells: e.cells });
+      all({ t: 'cells', by: e.by, cells: e.cells, unlock: e.unlock });
+    });
+    s.events.on('finished', (players) => {
+      this.dirty.add(s);
+      console.log(`session ${s.id} complete`);
+      all({ t: 'finished', players });
     });
     s.events.on('blast', (e) => all({ t: 'blast', ...e }));
     s.events.on('settle', (e) => all({ t: 'settle', ...e }));
@@ -137,7 +142,7 @@ export class Lobby {
     c.token = p.token;
     this.conns.get(s)!.add(c);
     s.setOnline(p.color, true, now);
-    send(c, { t: 'welcome', token: p.token, session: s.id, seed: s.seed, you: p.color, players: s.playerInfo(), chunks: s.snapshotChunks(), flags: [...p.flags] });
+    send(c, { t: 'welcome', token: p.token, session: s.id, seed: s.seed, you: p.color, players: s.playerInfo(), chunks: s.snapshotChunks(), flags: [...p.flags], unlock: s.unlockRatio(), final: s.final });
     this.dirty.add(s);
   }
 
@@ -157,7 +162,7 @@ export class Lobby {
     }
   }
 
-  /** A random session with room and land left (user decision: under 90 % opened, fewer than 12 players). */
+  /** A random session still running with room and land left (user decision: under 60 % opened, fewer than 12 players). */
   private pick(): Session | undefined {
     const open = [...this.sessions.values()].filter((s) => s.joinable());
     return open.length ? open[Math.floor(Math.random() * open.length)] : undefined;
@@ -180,12 +185,12 @@ export class Lobby {
     if (![...this.conns.get(s)!].some((o) => o.token === c.token)) s.setOnline(c.color, false, Date.now());
   }
 
-  /** Every 30 s: drop idle players, forget finished empty sessions, save what changed. */
+  /** Every 30 s: drop idle players, forget empty sessions nobody can join any more (complete or past the join limit), save what changed. */
   sweep(): void {
     const now = Date.now();
     for (const s of this.sessions.values()) if (s.dropIdle(now).length) this.dirty.add(s);
     for (const s of [...this.sessions.values()]) {
-      if (s.players.size || s.unlockRatio() < MULTI.joinMaxUnlock) continue;
+      if (s.players.size || (!s.final && s.unlockRatio() < MULTI.joinMaxUnlock)) continue;
       this.sessions.delete(s.id);
       this.conns.delete(s);
       this.dirty.delete(s);

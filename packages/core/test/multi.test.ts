@@ -70,7 +70,7 @@ function play(s: Session, p: SessionPlayer, steps: number): void {
 }
 
 function events(s: Session) {
-  const log: { [K in keyof SessionEvents]: SessionEvents[K][] } = { cells: [], blast: [], settle: [], players: [], gameover: [] };
+  const log: { [K in keyof SessionEvents]: SessionEvents[K][] } = { cells: [], blast: [], settle: [], players: [], gameover: [], finished: [] };
   for (const k of Object.keys(log) as Array<keyof SessionEvents>) s.events.on(k, (e) => (log[k] as unknown[]).push(e));
   return log;
 }
@@ -341,6 +341,48 @@ describe('multiplayer session', () => {
     expect(s.landCells).toBeGreaterThan(200_000);
   });
 
+  it('stops taking new players at the join limit, and takes them again when the share drops', () => {
+    const s = session();
+    join(s, 'a');
+    // Pretend the map is opened up to the limit, then a game over takes a cell back.
+    const set = (ratio: number) => ((s as unknown as { opened: number }).opened = Math.ceil(ratio * s.landCells));
+    set(MULTI.joinMaxUnlock);
+    expect(s.joinable()).toBe(false);
+    set(MULTI.joinMaxUnlock - 1 / s.landCells);
+    expect(s.joinable()).toBe(true);
+  });
+
+  it('completes at the end share: the standings are final, actions are refused, nobody joins', () => {
+    const s = session();
+    const log = events(s);
+    const a = join(s, 'a');
+    const b = join(s, 'b');
+    s.reveal(a.color, SAHARA.x, SAHARA.y);
+    s.reveal(b.color, SIBERIA.x, SIBERIA.y);
+    expect(s.final).toBeNull();
+    // Just under the end share; b's next opening crosses it.
+    (s as unknown as { opened: number }).opened = Math.ceil(MULTI.endUnlock * s.landCells) - 1;
+    play(s, b, 20);
+    expect(log.finished.length).toBe(1);
+    const final = log.finished[0];
+    expect(s.final).toEqual(final);
+    expect(final.map((p) => p.color).sort()).toEqual([a.color, b.color].sort());
+    expect(final[0].score).toBeGreaterThanOrEqual(final[1].score);
+    expect(log.cells.at(-1)!.unlock).toBeGreaterThanOrEqual(MULTI.endUnlock);
+    expect(s.joinable()).toBe(false);
+    const before = s.unlockRatio();
+    const scores = s.playerInfo().map((p) => p.score);
+    expect(s.reveal(a.color, SAHARA.x + 40, SAHARA.y)).toEqual({ ok: false });
+    expect(s.flag(a.color, SAHARA.x + 40, SAHARA.y, true)).toEqual({ ok: false });
+    play(s, a, 20);
+    expect(s.unlockRatio()).toBe(before);
+    expect(s.playerInfo().map((p) => p.score)).toEqual(scores);
+    expect(log.finished.length).toBe(1);
+    const t = Session.fromSave(JSON.parse(JSON.stringify(s.toSave())));
+    expect(t.final).toEqual(final);
+    expect(t.joinable()).toBe(false);
+  });
+
   it('round-trips through a save', () => {
     const s = session();
     const a = join(s, 'a');
@@ -372,7 +414,7 @@ describe('multiplayer mirror', () => {
     const a = join(s, 'a');
     const b = join(s, 'b');
     s.reveal(b.color, SIBERIA.x, SIBERIA.y);
-    const welcome = { t: 'welcome' as const, token: 'a', session: s.id, seed: s.seed, you: a.color, players: s.playerInfo(), chunks: s.snapshotChunks(), flags: [] };
+    const welcome = { t: 'welcome' as const, token: 'a', session: s.id, seed: s.seed, you: a.color, players: s.playerInfo(), chunks: s.snapshotChunks(), flags: [], unlock: s.unlockRatio(), final: null };
     const m = new MirrorGame(welcome);
     const sent: ClientMsg[] = [];
     m.send = (msg) => sent.push(msg);

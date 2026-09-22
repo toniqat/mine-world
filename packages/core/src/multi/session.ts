@@ -31,6 +31,9 @@ import { MULTI, SIGNATURE_COLORS, multiConfig, type MultiError, type PlayerInfo,
  *   openings settle), per player: a number is sealed for a player when every
  *   closed neighbour carries one of their flags. A new base takes the opened
  *   cells around it (`claimAround`), other players' land included.
+ * - Once `MULTI.endUnlock` of the land is opened the session is complete:
+ *   the standings at that moment are final (`final`, the leader wins) and
+ *   every action is refused from then on.
  */
 export interface SessionPlayer {
   token: string;
@@ -48,14 +51,16 @@ export interface SessionPlayer {
 }
 
 export interface SessionEvents extends Record<string, unknown> {
-  /** Cells changed by the action of `by` (a colour, or -1). */
-  cells: { by: number; cells: WireCells };
+  /** Cells changed by the action of `by` (a colour, or -1); `unlock` after them. */
+  cells: { by: number; cells: WireCells; unlock: number };
   blast: { x: number; y: number; r: number; color: number };
   settle: { color: number; x: number; y: number; cells: number[]; correct: number; wrong: number; payout: number };
   /** Scores, main bases or the player list changed. */
   players: PlayerInfo[];
   /** A player stepped on a mine and left. */
   gameover: { color: number; token: string; score: number };
+  /** The session is complete (`MULTI.endUnlock` reached): the final standings. */
+  finished: PlayerInfo[];
 }
 
 export type ActionResult = { ok: true } | { ok: false; error?: MultiError };
@@ -69,6 +74,8 @@ export interface SessionSave {
   chunks: Array<[number, string, string]>;
   players: Array<{ token: string; color: number; score: number; main: number | null; flags: number[]; deferred: number[]; lastSeen: number }>;
   hits: number;
+  /** Final standings of a complete session (absent while it runs). */
+  final?: PlayerInfo[];
 }
 
 /** Owner per cell: signature colour + 1, 0 = nobody. Stored like the board, in 16x16 chunks. */
@@ -106,6 +113,8 @@ export class Session {
   /** Land cells on the map, and land cells no longer Unknown. */
   readonly landCells: number;
   private opened = 0;
+  /** Final standings once the session is complete (null while it runs). */
+  final: PlayerInfo[] | null = null;
   private hits = 0;
   private rescues = { left: 0 };
   /** Changes of the current action, flushed as one `cells` event. */
@@ -139,9 +148,9 @@ export class Session {
     return this.opened / this.landCells;
   }
 
-  /** Room for one more player, and not too much of the map opened yet. */
+  /** Room for one more player, still running, and not too much of the map opened yet. */
   joinable(): boolean {
-    return this.players.size < MULTI.maxPlayers && this.unlockRatio() < MULTI.joinMaxUnlock;
+    return !this.final && this.players.size < MULTI.maxPlayers && this.unlockRatio() < MULTI.joinMaxUnlock;
   }
 
   playerInfo(): PlayerInfo[] {
@@ -219,7 +228,7 @@ export class Session {
   /** Open a cell; the player's first opening places their main base. */
   reveal(color: number, x: number, y: number): ActionResult {
     const p = this.players.get(color);
-    if (!p) return { ok: false };
+    if (!p || this.final) return { ok: false };
     x = this.wx(x);
     if (isWall(this.board.get(x, y))) return { ok: false, error: 'water' };
     if (this.board.get(x, y) !== CellState.Unknown) return { ok: true };
@@ -232,7 +241,7 @@ export class Session {
   /** Open every closed neighbour of a number whose flags (the player's own) and known mines match it. Never rescued. */
   chord(color: number, x: number, y: number): ActionResult {
     const p = this.players.get(color);
-    if (!p || p.main === null) return { ok: false };
+    if (!p || p.main === null || this.final) return { ok: false };
     x = this.wx(x);
     const s = this.board.get(x, y);
     if (!isRevealed(s)) return { ok: true };
@@ -260,7 +269,7 @@ export class Session {
   /** Place or lift one of the player's (private) flags. It settles on the next opening, never by itself. */
   flag(color: number, x: number, y: number, on: boolean): ActionResult {
     const p = this.players.get(color);
-    if (!p || p.main === null) return { ok: false };
+    if (!p || p.main === null || this.final) return { ok: false };
     x = this.wx(x);
     const k = cellKey(x, y);
     if (on) {
@@ -427,6 +436,11 @@ export class Session {
     }
     this.flush(actor.color);
     this.emitPlayers();
+    // Only openings raise the share, so this is the one place a session completes.
+    if (!this.final && this.unlockRatio() >= MULTI.endUnlock) {
+      this.final = this.playerInfo();
+      this.events.emit('finished', this.final);
+    }
   }
 
   /** A revealed number whose every closed neighbour carries one of `q`'s flags. */
@@ -531,7 +545,7 @@ export class Session {
     if (!this.changed.length) return;
     const cells = this.changed;
     this.changed = [];
-    this.events.emit('cells', { by, cells });
+    this.events.emit('cells', { by, cells, unlock: this.unlockRatio() });
   }
 
   private emitPlayers(): void {
@@ -554,6 +568,7 @@ export class Session {
       chunks: this.snapshotChunks(),
       players: [...this.players.values()].map((p) => ({ token: p.token, color: p.color, score: p.score, main: p.main, flags: [...p.flags], deferred: [...p.deferred], lastSeen: p.lastSeen })),
       hits: this.hits,
+      ...(this.final ? { final: this.final } : {}),
     };
   }
 
@@ -565,6 +580,7 @@ export class Session {
     s.world.densityDebt = d.world.densityDebt;
     s.world.interventions = d.world.interventions;
     s.hits = d.hits;
+    s.final = d.final ?? null;
     for (const p of d.players) {
       s.players.set(p.color, { token: p.token, color: p.color, score: p.score, main: p.main, flags: new Set(p.flags), cells: new Set(), deferred: new Set(p.deferred), online: false, lastSeen: p.lastSeen });
     }
