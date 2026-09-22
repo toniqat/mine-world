@@ -24,7 +24,7 @@ npm run electron:dev   # Vite dev server + Electron window
 npm test               # core invariants (vitest)
 npm run sim            # Phase 0 measurements (~3-5 min); add -- --quick for a short run
 npm run typecheck      # all packages
-npm run build          # packages/web/dist
+npm run build          # packages/web/dist (a push to main deploys it to https://toniqat.github.io/mine-world/ via .github/workflows/pages.yml)
 ```
 
 Visual check without a human: build web, then in `packages/electron` run `npx electron . --exec=script.js --screenshot=out.png` (see its README; clear `ELECTRON_RUN_AS_NODE` if an IDE terminal set it).
