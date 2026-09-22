@@ -9,6 +9,7 @@ import { Camera } from './render/camera';
 import { CELL } from './render/textures';
 import { loadSettings, saveSettings, writeSave, type Settings } from './storage';
 import { PALETTES, applyTheme, onSystemThemeChange, resolveTheme } from './theme';
+import { RepairBubble } from './ui/bubble';
 import { Hud, type PanelName } from './ui/hud';
 import { Panels } from './ui/panels';
 import { StartHint, TITLE_LEAVE_MS, TitleScreen } from './ui/title';
@@ -32,6 +33,13 @@ export class App {
   private input!: InputController;
   private hud!: Hud;
   private panels!: Panels;
+  private bubble!: RepairBubble;
+  /** The board click of this gesture only dismissed a modal (the repair bubble): it does nothing else. */
+  private swallowPrimary = false;
+  /** The next DOM click only dismissed a modal: it is stopped before it reaches a button. */
+  private swallowClick = false;
+  /** Popover a pointerdown outside it closed in this gesture (clicking the main base then does not reopen it). */
+  private dismissed: PanelName | null = null;
   private toasts!: Toasts;
   private flagMode = false;
   /** Drone being dragged to another Owned mine (drones exist only with equipment). */
@@ -86,14 +94,23 @@ export class App {
     });
     this.panels = new Panels(document.getElementById('panel')!, {
       buy: (id) => this.buy(id),
-      gotoCell: (x, y) => this.gotoCell(x, y),
       upgradeMainBase: () => this.upgradeMainBase(),
-      repairBase: (x, y) => this.repairBase(x, y),
       newGame: () => this.restart(),
       saveNow: () => this.save(true),
       settingsChanged: (s) => this.applySettings(s),
-      close: () => this.togglePanel(null),
     });
+    this.bubble = new RepairBubble(this.appEl, (x, y) => this.repairBase(x, y));
+    document.addEventListener('pointerdown', (e) => this.onDocPointerDown(e), true);
+    document.addEventListener(
+      'click',
+      (e) => {
+        if (!this.swallowClick) return;
+        this.swallowClick = false;
+        e.stopPropagation();
+        e.preventDefault();
+      },
+      true,
+    );
     this.input = new InputController(this.app.canvas, this.cam, {
       primary: (c) => this.onPrimary(c),
       secondary: (c) => this.onSecondary(c),
@@ -137,6 +154,7 @@ export class App {
       this.view.setDroneTiming(acc, this.game.droneActionsPerSec(), this.game.droneMoveSpeed());
       this.view.update(this.cam);
       this.hud.update(this.game);
+      this.bubble.update(this.game, this.cam);
       if (this.dirty && performance.now() - this.lastSave > 15000) void this.save(false);
       this.panelTimer += dt;
       if (this.panels.current === 'base' && this.panelTimer > 1) {
@@ -305,14 +323,43 @@ export class App {
     this.bindGame();
     this.centerOnStart();
     this.dirty = true;
+    this.bubble.hide();
     this.refreshPanel();
     this.syncHint();
   }
 
   // ------------------------------------------------------------------ input
 
+  /**
+   * A press anywhere outside the open popover closes it (modeless: the click
+   * still does what it would, except on the popover's own HUD button, which
+   * toggles it). A press outside the repair bubble closes it and does nothing
+   * else (modal).
+   */
+  private onDocPointerDown(e: PointerEvent): void {
+    this.swallowPrimary = false;
+    this.swallowClick = false;
+    this.dismissed = null;
+    const target = e.target instanceof Element ? e.target : null;
+    const inside = (id: string) => target !== null && target.closest(`#${id}`) !== null;
+    if (inside('modal') || inside('toasts')) return;
+    if (this.bubble.key !== null && !this.bubble.contains(target)) {
+      this.bubble.hide();
+      this.view.setSelectedBase(null);
+      if (this.app.canvas.contains(target)) this.swallowPrimary = true;
+      else this.swallowClick = true;
+      return;
+    }
+    if (this.panels.current && !inside('panel') && !inside('hud')) {
+      this.dismissed = this.panels.current;
+      this.togglePanel(null);
+    }
+  }
+
   private onPrimary(c: { x: number; y: number }): void {
+    if (this.swallowPrimary) return void (this.swallowPrimary = false);
     if (this.game.baseInfo(c.x, c.y)) return this.selectBase(cellKey(c.x, c.y));
+    this.view.setSelectedBase(null);
     const s = this.game.cellState(c.x, c.y);
     if (isRevealed(s)) return this.chordAt(c);
     if (this.lockedToast(c)) return;
@@ -365,6 +412,7 @@ export class App {
   }
 
   private onSecondary(c: { x: number; y: number }): void {
+    if (this.swallowPrimary) return void (this.swallowPrimary = false);
     const s = this.game.cellState(c.x, c.y);
     if (this.lockedToast(c)) return;
     if (isRevealed(s)) this.chordAt(c);
@@ -408,6 +456,8 @@ export class App {
   private onKey(code: string, ev: KeyboardEvent): void {
     switch (code) {
       case 'Escape':
+        this.bubble.hide();
+        this.view.setSelectedBase(null);
         this.togglePanel(null);
         break;
       case 'KeyF':
@@ -454,33 +504,38 @@ export class App {
     this.refreshPanel();
   }
 
+  /**
+   * Clicking a base lights it up (and its route); clicking it again lets go.
+   * The main base also opens its popover; a disabled base shows the repair bubble.
+   */
   private selectBase(key: number): void {
-    this.panels.base = key;
+    if (key === this.game.bases.main) {
+      if (this.dismissed === 'base') return this.view.setSelectedBase(null);
+      return this.toggleMain();
+    }
+    if (this.panels.current) this.togglePanel(null);
+    if (this.view.selected === key && this.bubble.key === null) return this.view.setSelectedBase(null);
     this.view.setSelectedBase(key);
-    if (this.panels.current === 'base') {
-      this.refreshPanel();
-      this.syncHudActive();
-    } else this.togglePanel('base');
+    if (this.game.bases.disabled.has(key)) {
+      this.bubble.show(key, this.game);
+      this.bubble.update(this.game, this.cam);
+    }
   }
 
-  /** `U` and a click on the main base open the same panel. */
+  /** `U`, the HUD button and a click on the main base open (or close) the main-base popover. */
   private toggleMain(): void {
-    const main = this.game.bases.main;
-    if (this.panels.current === 'base' && (this.panels.base === null || this.panels.base === main)) return this.togglePanel(null);
-    if (main === null) {
-      this.panels.base = null;
-      this.view.setSelectedBase(null);
-      if (this.panels.current === 'base') return this.refreshPanel(), this.syncHudActive();
-      return this.togglePanel('base');
-    }
-    this.selectBase(main);
+    this.bubble.hide();
+    if (this.panels.current === 'base') return this.togglePanel(null);
+    this.togglePanel('base');
+    this.view.setSelectedBase(this.game.bases.main);
   }
 
   private repairBase(x: number, y: number): void {
     const r = this.game.repairBase(x, y);
-    if (r.ok) this.toasts.show(t('toast.repaired'), 'good');
-    else if (r.reason === 'money') this.toasts.show(t('toast.noMoney'), 'bad');
-    this.refreshPanel();
+    if (r.ok) {
+      this.toasts.show(t('toast.repaired'), 'good');
+      this.bubble.hide();
+    } else if (r.reason === 'money') this.toasts.show(t('toast.noMoney'), 'bad');
   }
 
   private upgradeMainBase(): void {
@@ -522,10 +577,8 @@ export class App {
 
   private togglePanel(name: PanelName | null): void {
     const next = name === null || this.panels.current === name ? null : name;
-    if (next !== 'base') {
-      this.panels.base = null;
-      this.view.setSelectedBase(null);
-    }
+    // Leaving the main-base popover lets go of the main base.
+    if (this.panels.current === 'base' && next !== 'base' && this.view.selected === this.game.bases.main) this.view.setSelectedBase(null);
     this.panels.open(next, this.game, this.settings);
     this.syncHudActive();
   }

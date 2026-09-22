@@ -284,6 +284,8 @@ export class BoardView {
   private readonly baseGfx = new Graphics();
   /** Redrawn every frame: shipments travelling along the base network. */
   private readonly shipGfx = new Graphics();
+  /** Redrawn every frame: the selected base's light and its enlarged icon. */
+  private readonly selGfx = new Graphics();
   private readonly overlay = new Container();
   private readonly highlightGfx = new Graphics();
   private readonly scannerGfx = new Graphics();
@@ -319,6 +321,8 @@ export class BoardView {
   private hover: { x: number; y: number } | null = null;
   private highlight: { keys: number[]; color: number; until: number } | null = null;
   private selectedBase: number | null = null;
+  /** When the selected base was picked (its icon pops up from normal size). */
+  private selectedAt = 0;
   /** Base network and complex tint; rebuilt when bases change. */
   private net: Net | null = null;
   /** Isolated / disabled bases as last painted (key -> BaseStyle). */
@@ -370,6 +374,7 @@ export class BoardView {
       this.densityLayer,
       this.baseGfx,
       this.shipGfx,
+      this.selGfx,
       this.droneRangeGfx,
       this.hoverSprite,
       this.markLayer,
@@ -943,7 +948,12 @@ export class BoardView {
     this.baseStyles = now;
   }
 
+  get selected(): number | null {
+    return this.selectedBase;
+  }
+
   setSelectedBase(key: number | null): void {
+    if (key !== this.selectedBase) this.selectedAt = performance.now();
     this.selectedBase = key;
     this.overlayDirty = true;
   }
@@ -1028,7 +1038,51 @@ export class BoardView {
     this.updateDigitFades(now);
     this.drawFx(now);
     this.drawShipments(now, cam.zoom);
+    this.drawSelected(now);
     this.drawDrones(now);
+  }
+
+  /**
+   * The selected base: a soft light behind it and its icon drawn a little
+   * larger on top (popping up with a slight overshoot when picked).
+   */
+  private drawSelected(now: number): void {
+    const g = this.selGfx;
+    g.clear();
+    const key = this.selectedBase;
+    if (key === null) return;
+    const bases = this.game.bases;
+    const main = key === bases.main;
+    if (!main && !bases.isBase(key)) return;
+    const p = this.palette;
+    const u = Math.min(1, (now - this.selectedAt) / SEL_POP_MS);
+    // easeOutBack: 0 -> 1 with a small overshoot.
+    const k = 1 + 2.2 * Math.pow(u - 1, 3) + 1.2 * Math.pow(u - 1, 2);
+    const x = (keyX(key) + 0.5) * CELL;
+    const y = (keyY(key) + 0.5) * CELL;
+    // Light: stacked translucent discs make a radial falloff.
+    const r = SEL_GLOW_R * CELL * (0.6 + 0.4 * k);
+    for (let i = SEL_GLOW_STEPS; i >= 1; i--) g.circle(x, y, (r * i) / SEL_GLOW_STEPS).fill({ color: p.accent, alpha: (SEL_GLOW_ALPHA * u) / SEL_GLOW_STEPS });
+    g.circle(x, y, r * 0.45).fill({ color: 0xffffff, alpha: 0.18 * u });
+    const s = 1 + (SEL_SCALE - 1) * k;
+    if (main) {
+      const h = CELL * 0.44 * s;
+      g.poly([x, y - h, x + h, y, x, y + h, x - h, y]).fill({ color: p.cellOwned });
+      const i = CELL * 0.18 * s;
+      g.poly([x, y - i, x + i, y, x, y + i, x - i, y]).fill({ color: p.bg });
+      return;
+    }
+    const br = BASE_DOT_R * s * SEL_DOT_SCALE;
+    if (bases.disabled.has(key)) {
+      g.circle(x, y, br).fill({ color: p.fgMuted, alpha: 0.35 });
+      const d = br * 1.25;
+      g.moveTo(x - d, y + d).lineTo(x + d, y - d).stroke({ width: 2 * s, color: p.error, alpha: 0.85 });
+    } else if (bases.isolated.has(key)) {
+      g.circle(x, y, br).fill({ color: p.cellOwned, alpha: 0.35 });
+    } else {
+      g.circle(x, y, br).fill({ color: p.cellOwned });
+      g.circle(x, y, br / 2).fill({ color: 0xffffff, alpha: 0.35 });
+    }
   }
 
   /** Per-frame effects: settlement pulses, blasts and grand complexes forming. */
@@ -1335,12 +1389,7 @@ export class BoardView {
         for (const path of route) drawPathLine(g, path, 0, path.length - 1);
         g.stroke({ width: w, color: p.accent, alpha: 0.35, join: 'miter', cap: 'square' });
       }
-      // The rest of the selected base's complex.
-      const hub = bases.complexOf.get(sel.key);
-      for (const k of hub === undefined ? [] : bases.complexes.get(hub)!.members) {
-        if (k !== sel.key) g.roundRect(keyX(k) * CELL + 2, keyY(k) * CELL + 2, CELL - 4, CELL - 4, 4).stroke({ width: 1.5, color: p.accent, alpha: 0.5 });
-      }
-      g.roundRect(sel.x * CELL + 1, sel.y * CELL + 1, CELL - 2, CELL - 2, 4).stroke({ width: 2.5, color: p.accent, alpha: 1 });
+      // The base itself is lit up per frame (`drawSelected`).
     }
 
     if (bases.main !== null) {
@@ -1474,6 +1523,15 @@ const BLAST_STEP_MS = 55;
 const BLAST_TILE_MS = 900;
 /** A grand complex's formation effect lasts this long. */
 const GRAND_MS = 2200;
+/** Selected base: pop-in time, icon scale, light radius (tiles), strength and smoothness. */
+const SEL_POP_MS = 220;
+const SEL_SCALE = 1.3;
+const SEL_GLOW_R = 1.1;
+const SEL_GLOW_ALPHA = 0.55;
+const SEL_GLOW_STEPS = 8;
+/** Radius of the base dot in textures.ts, and how much more a selected dot grows than the diamond. */
+const BASE_DOT_R = 4;
+const SEL_DOT_SCALE = 1.2;
 
 const enum BaseStyle {
   Normal,
