@@ -5,6 +5,10 @@ export type Lang = 'ko' | 'en';
 
 const STRINGS = {
   ko: {
+    'title.start': '시작',
+    'title.continue': '이어하기',
+    'title.newGame': '새 게임',
+    'title.hint': '아무 곳이나 클릭해 주 거점을 세우세요',
     'hud.credits': '크레딧',
     'hud.income': '/초',
     'hud.unbanked': '미정산',
@@ -150,6 +154,10 @@ const STRINGS = {
     'no': '끔',
   },
   en: {
+    'title.start': 'Start',
+    'title.continue': 'Continue',
+    'title.newGame': 'New game',
+    'title.hint': 'Click anywhere to found the main base',
     'hud.credits': 'Credits',
     'hud.income': '/s',
     'hud.unbanked': 'Unbanked',

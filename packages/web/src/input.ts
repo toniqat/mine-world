@@ -31,6 +31,8 @@ const DRAG_THRESHOLD = 6;
 
 export class InputController {
   longPressMs = 450;
+  /** Off while the title screen or the intro is up: pointer, wheel and keys are ignored. */
+  enabled = true;
   private pointers = new Map<number, PointerRec>();
   private dragging = false;
   private grabbing = false;
@@ -84,7 +86,7 @@ export class InputController {
   }
 
   private onDown = (e: PointerEvent): void => {
-    if (isEditable(e.target)) return;
+    if (!this.enabled || isEditable(e.target)) return;
     this.canvas.setPointerCapture(e.pointerId);
     const rec: PointerRec = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, button: e.button, isTouch: e.pointerType === 'touch' };
     this.pointers.set(e.pointerId, rec);
@@ -118,7 +120,7 @@ export class InputController {
   private onMove = (e: PointerEvent): void => {
     const rec = this.pointers.get(e.pointerId);
     if (!rec) {
-      this.h.hover(this.cellAt(e.clientX, e.clientY));
+      if (this.enabled) this.h.hover(this.cellAt(e.clientX, e.clientY));
       return;
     }
     const px = rec.x;
@@ -185,13 +187,14 @@ export class InputController {
 
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
+    if (!this.enabled) return;
     const r = this.canvas.getBoundingClientRect();
     const factor = Math.exp(-e.deltaY * 0.0015);
     this.cam.zoomAt(e.clientX - r.left, e.clientY - r.top, factor);
   };
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    if (isEditable(e.target)) return;
+    if (!this.enabled || isEditable(e.target)) return;
     this.keys.add(e.code);
     this.h.key(e.code, e);
   };

@@ -14,10 +14,10 @@ import { CELL, buildTextures, destroyTextures, stateTexture, type CellTextures }
 const DIGIT_MIN_ZOOM = 0.5;
 /** A finished number fades out over this long. */
 const DIGIT_FADE_MS = 300;
-/** An opened tile's cover fades out over this long... */
-const COVER_MS = 140;
-/** ...starting this much later per cell of distance from where its cascade began. */
-const COVER_STEP_MS = 11;
+/** An opened tile flips over this long (the cover folds away, then the face unfolds)... */
+const COVER_MS = 200;
+/** ...starting this much later per cell of distance from the cell that was clicked. */
+const COVER_STEP_MS = 13;
 const MAX_COVERS = 1500;
 const MARK_IN_MS = 110;
 const MARK_OUT_MS = 70;
@@ -25,6 +25,14 @@ const PULSE_MS = 240;
 /** Ripple delay per cell of distance from the settlement batch centre. */
 const PULSE_STEP_MS = 17.5;
 const MAX_MARK_ANIMS = 64;
+/** Intro: the diagonal wave takes this long to cross the screen (top-left to bottom-right)... */
+const INTRO_SPAN_MS = 1000;
+/** ...each tile pops in over this long... */
+const INTRO_TILE_MS = 320;
+/** ...with up to this much random lag... */
+const INTRO_JITTER_MS = 90;
+/** ...and the overlays (bases, network) fade in over this long once it is done. */
+const INTRO_OVERLAY_MS = 350;
 
 /** Alpha of a number that can tell nothing more but still waits on an unsettled flag. */
 const DIGIT_DIM_ALPHA = 0.25;
@@ -145,12 +153,15 @@ class ChunkView {
     for (let i = 0; i < CHUNK * CHUNK; i++) {
       const x = i & 15;
       const y = i >> 4;
+      // Centred so tiles can scale about their middle (intro, flips).
       const s = new Sprite(tex.unknown);
-      s.position.set(x * CELL, y * CELL);
+      s.anchor.set(0.5);
+      s.position.set((x + 0.5) * CELL, (y + 0.5) * CELL);
       bgLayer.addChild(s);
       this.bg.push(s);
       const d = new Sprite(tex.empty);
-      d.position.set(x * CELL, y * CELL);
+      d.anchor.set(0.5);
+      d.position.set((x + 0.5) * CELL, (y + 0.5) * CELL);
       d.visible = false;
       digitLayer.addChild(d);
       this.digit.push(d);
@@ -256,6 +267,10 @@ export class BoardView {
   private digitFades: DigitFade[] = [];
   private pulses: Pulse[] = [];
   private densityOverlay = false;
+  /** Tile-intro wave in progress (see `intro`). */
+  private introFx: { start: number; end: number; settled: boolean } | null = null;
+  /** When set, reveals ripple out from this cell instead of each cascade's own start (a chord). */
+  rippleFrom: number | null = null;
   private digitsVisible = true;
   private lastVisible = { x0: 0, y0: 0, x1: -1, y1: -1 };
   private overlayDirty = true;
@@ -313,6 +328,8 @@ export class BoardView {
     for (const c of this.covers) this.releaseCover(c);
     this.covers = [];
     this.digitFades = [];
+    this.introFx = null;
+    this.overlay.alpha = 1;
     this.ghosts = [];
     this.droneLines.clear();
     this.drag = null;
@@ -345,8 +362,9 @@ export class BoardView {
         if (c.state === CellState.Flag && prev === CellState.Unknown) this.startMark(k, true, now);
         else if (c.state === CellState.Unknown && prev === CellState.Flag) this.startMark(k, false, now);
         else if (isRevealed(c.state) && (prev === CellState.Unknown || prev === CellState.Flag)) {
-          // Cascades ripple outwards from the cell that started them.
-          const delay = c.from === undefined ? 0 : Math.hypot(c.x - keyX(c.from), c.y - keyY(c.from)) * COVER_STEP_MS;
+          // Reveals ripple outwards from the clicked cell (a cascade's start, or the chorded number).
+          const from = this.rippleFrom ?? c.from;
+          const delay = from === undefined ? 0 : Math.hypot(c.x - keyX(from), c.y - keyY(from)) * COVER_STEP_MS;
           this.startCover(k, prev, now + delay);
         }
       }
@@ -417,7 +435,7 @@ export class BoardView {
     }
   }
 
-  /** Fade the previous tile (Unknown or flag) away over a freshly opened cell, starting at `start`. */
+  /** Flip a freshly opened cell at `start`: its previous tile (Unknown or flag) folds away, then its number unfolds. */
   private startCover(key: number, prev: number, start: number): void {
     const old = this.covers.findIndex((c) => c.key === key);
     if (old >= 0) {
@@ -431,12 +449,17 @@ export class BoardView {
     sprite.position.set((keyX(key) + 0.5) * CELL, (keyY(key) + 0.5) * CELL);
     sprite.scale.set(1);
     sprite.alpha = 1;
+    sprite.tint = 0xffffff;
     sprite.visible = true;
     this.coverLayer.addChild(sprite);
     this.covers.push({ key, sprite, start });
+    const d = this.digitSprite(key);
+    if (d) d.scale.x = 0;
   }
 
   private releaseCover(c: CellFx): void {
+    const d = this.digitSprite(c.key);
+    if (d) d.scale.set(1);
     c.sprite.visible = false;
     this.coverLayer.removeChild(c.sprite);
     this.coverPool.push(c.sprite);
@@ -451,10 +474,79 @@ export class BoardView {
         return false;
       }
       if (t <= 0) return true;
-      c.sprite.alpha = 1 - t * t;
-      c.sprite.scale.set(1 - 0.12 * t);
+      // First half: the cover folds to an edge, darkening as it turns away.
+      // Second half: the face (its number) unfolds from that edge.
+      if (t < 0.5) {
+        const u = t / 0.5;
+        c.sprite.visible = true;
+        c.sprite.scale.set(Math.max(0, Math.cos((u * Math.PI) / 2)), 1 + 0.06 * Math.sin(u * Math.PI));
+        const shade = Math.round(255 * (1 - 0.35 * u));
+        c.sprite.tint = (shade << 16) | (shade << 8) | shade;
+      } else {
+        c.sprite.visible = false;
+        const d = this.digitSprite(c.key);
+        if (d) d.scale.x = Math.sin(((t - 0.5) / 0.5) * (Math.PI / 2));
+      }
       return true;
     });
+  }
+
+  private digitSprite(key: number): Sprite | null {
+    const x = keyX(key);
+    const y = keyY(key);
+    const v = this.chunks.get(cellKey(x >> 4, y >> 4));
+    return v ? v.digit[((y & 15) << 4) | (x & 15)] : null;
+  }
+
+  /**
+   * Tiles appear in a diagonal wave from the top-left corner of the screen to
+   * the bottom-right; the overlays fade in after. Returns the duration in ms.
+   */
+  intro(): number {
+    const start = performance.now();
+    this.introFx = { start, end: start + INTRO_SPAN_MS + INTRO_JITTER_MS + INTRO_TILE_MS, settled: false };
+    this.overlay.alpha = 0;
+    for (const c of this.covers) this.releaseCover(c);
+    this.covers = [];
+    return this.introFx.end - start + INTRO_OVERLAY_MS;
+  }
+
+  private fadeInOverlay(now: number, from: number): void {
+    const u = Math.min(1, (now - from) / INTRO_OVERLAY_MS);
+    this.overlay.alpha = u;
+    if (u >= 1) this.introFx = null;
+  }
+
+  private updateIntro(now: number, cam: Camera): void {
+    const fx = this.introFx;
+    if (!fx) return;
+    if (now >= fx.end) {
+      if (!fx.settled) {
+        fx.settled = true;
+        for (const v of this.chunks.values()) {
+          for (let i = 0; i < CHUNK * CHUNK; i++) {
+            v.bg[i].scale.set(1);
+            v.bg[i].alpha = 1;
+            v.digit[i].scale.set(1);
+          }
+        }
+      }
+      return this.fadeInOverlay(now, fx.end);
+    }
+    const diag = Math.max(1, cam.width + cam.height);
+    for (const v of this.chunks.values()) {
+      for (let i = 0; i < CHUNK * CHUNK; i++) {
+        const x = v.cx * CHUNK + (i & 15);
+        const y = v.cy * CHUNK + (i >> 4);
+        const p = cam.worldToScreen((x + 0.5) * CELL, (y + 0.5) * CELL);
+        const f = Math.min(1, Math.max(0, (p.x + p.y) / diag));
+        const t = (now - fx.start - f * INTRO_SPAN_MS - hash01(0x1a7e, x, y) * INTRO_JITTER_MS) / INTRO_TILE_MS;
+        const k = t <= 0 ? 0 : t >= 1 ? 1 : easeOutBack(t);
+        v.bg[i].scale.set(k);
+        v.bg[i].alpha = Math.min(1, Math.max(0, t * 2.5));
+        v.digit[i].scale.set(k);
+      }
+    }
   }
 
   /** Finished numbers fade to nothing. */
@@ -643,6 +735,7 @@ export class BoardView {
       this.drawOverlay(vis, cam.zoom);
     }
     const now = performance.now();
+    this.updateIntro(now, cam);
     this.updateMarks(now);
     this.updateCovers(now);
     this.updateDigitFades(now);

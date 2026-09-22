@@ -1,15 +1,23 @@
 import { Application } from 'pixi.js';
 import { CellState, Game, cellKey, isRevealed, keyX, keyY, type SaveData } from '@mine/core';
+import { DemoPlayer } from './demo';
 import { fmt, pct } from './format';
 import { resolveLang, setLang, t, upgradeName } from './i18n';
 import { InputController } from './input';
 import { BoardView } from './render/boardView';
 import { Camera } from './render/camera';
+import { CELL } from './render/textures';
 import { loadSettings, saveSettings, writeSave, type Settings } from './storage';
 import { PALETTES, applyTheme, onSystemThemeChange, resolveTheme } from './theme';
 import { Hud, type PanelName } from './ui/hud';
 import { Panels } from './ui/panels';
+import { StartHint, TITLE_LEAVE_MS, TitleScreen } from './ui/title';
 import { Toasts, confirmDialog } from './ui/toast';
+
+/** The demo board behind the title fades out over this long once Start is pressed. */
+const DEMO_FADE_MS = 500;
+/** Zoom of the title-screen demo. */
+const DEMO_ZOOM = 1.25;
 
 /** Wires core Game <-> Pixi renderer <-> DOM chrome. */
 export class App {
@@ -30,11 +38,20 @@ export class App {
   private saving = false;
   private panelTimer = 0;
   private unsub: Array<() => void> = [];
+  /** Title-screen demo; null once the player pressed Start. */
+  private demo: DemoPlayer | null = null;
+  private title: TitleScreen | null = null;
+  /** When Start was pressed: the demo board fades out from then. */
+  private leavingAt = 0;
+  private hint: StartHint | null = null;
+  private readonly hasSave: boolean;
+  private readonly appEl = document.getElementById('app')!;
 
   constructor(saved: SaveData | null) {
     this.settings = loadSettings();
     setLang(resolveLang(this.settings.lang));
     applyTheme(resolveTheme(this.settings.theme));
+    this.hasSave = saved !== null;
     this.game = saved ? Game.fromSave(saved) : this.newGame();
   }
 
@@ -49,7 +66,9 @@ export class App {
     await this.app.init({ resizeTo: stage, background: palette.bg, antialias: true, resolution: Math.min(2, window.devicePixelRatio || 1), autoDensity: true });
     stage.append(this.app.canvas);
 
-    this.view = new BoardView(this.app, this.game, palette);
+    // The title screen plays a throwaway demo world until Start is pressed.
+    this.demo = new DemoPlayer();
+    this.view = new BoardView(this.app, this.demo.game, palette);
     this.app.stage.addChild(this.view.root);
     this.toasts = new Toasts(document.getElementById('toasts')!);
     this.hud = new Hud(document.getElementById('hud')!, document.getElementById('statusbar')!, {
@@ -80,9 +99,16 @@ export class App {
       grabEnd: (c) => this.onGrabEnd(c),
     });
     this.applySettings(this.settings, false);
-    this.bindGame();
+    this.bindGame(this.demo.game, true);
     this.cam.resize(this.app.screen.width, this.app.screen.height);
-    this.centerOnStart();
+    this.cam.zoom = DEMO_ZOOM;
+    this.cam.centerOnCell(0, 0);
+    this.input.enabled = false;
+    this.appEl.classList.add('titling');
+    this.title = new TitleScreen(this.appEl, this.hasSave, {
+      start: () => void this.leaveTitle(false),
+      newGame: () => void this.leaveTitle(true),
+    });
 
     onSystemThemeChange(() => this.applySettings(this.settings, false));
     window.addEventListener('beforeunload', () => void this.save(true));
@@ -96,7 +122,10 @@ export class App {
       this.cam.resize(this.app.screen.width, this.app.screen.height);
       this.input.tick(dt);
       acc += dt;
-      if (acc >= 0.1) {
+      if (this.demo) {
+        this.tickDemo(this.demo, dt, acc >= 0.1 ? acc : 0);
+        if (acc >= 0.1) acc = 0;
+      } else if (acc >= 0.1) {
         this.game.tick(acc);
         acc = 0;
       }
@@ -113,23 +142,93 @@ export class App {
     });
   }
 
+  // ------------------------------------------------------------ title screen
+
+  /** The demo plays itself; the camera drifts after the cell it last touched. */
+  private tickDemo(demo: DemoPlayer, dt: number, gameDt: number): void {
+    if (this.leavingAt) {
+      this.view.root.alpha = Math.max(0, 1 - (performance.now() - this.leavingAt) / DEMO_FADE_MS);
+      return;
+    }
+    if (demo.tick(dt)) {
+      this.view.setGame(demo.game);
+      this.bindGame(demo.game, true);
+    }
+    if (gameDt) demo.game.tick(gameDt);
+    const k = 1 - Math.exp(-dt * 0.9);
+    this.cam.x += ((demo.focus.x + 0.5) * CELL - this.cam.x) * k;
+    this.cam.y += ((demo.focus.y + 0.5) * CELL - this.cam.y) * k;
+  }
+
+  /**
+   * Start pressed: the title slides away and the demo fades out, then the
+   * player's world appears tile by tile in a diagonal wave. `fresh` (the
+   * New game button next to Continue) replaces the saved world, keeping cores.
+   */
+  private async leaveTitle(fresh: boolean): Promise<void> {
+    if (!this.title || this.leavingAt) return;
+    if (fresh) {
+      const ok = await confirmDialog(document.getElementById('modal')!, t('settings.newGame.confirm'), t('confirm.yes'), t('confirm.no'));
+      if (!ok || !this.title) return;
+      const g = this.newGame();
+      g.econ.cores = this.game.econ.cores;
+      g.econ.lifetime = this.game.econ.lifetime;
+      this.game = g;
+      this.dirty = true;
+    }
+    this.title.leave();
+    this.title = null;
+    this.leavingAt = performance.now();
+    this.appEl.classList.remove('titling');
+    this.appEl.classList.add('intro');
+    await wait(TITLE_LEAVE_MS);
+    this.demo = null;
+    this.leavingAt = 0;
+    this.view.setGame(this.game);
+    this.view.root.alpha = 1;
+    this.bindGame(this.game);
+    this.cam.zoom = 1;
+    this.centerOnStart();
+    await wait(this.view.intro());
+    this.appEl.classList.remove('intro');
+    this.input.enabled = true;
+    this.syncHint();
+    if (fresh) void this.save(true);
+  }
+
+  /** A world nobody has opened yet asks for the first click (it founds the main base). */
+  private syncHint(): void {
+    const want = !this.demo && !this.game.world.started;
+    if (want && !this.hint) this.hint = new StartHint(this.appEl);
+    else if (!want && this.hint) {
+      this.hint.hide();
+      this.hint = null;
+    }
+  }
+
   // ---------------------------------------------------------------- game glue
 
-  private bindGame(): void {
+  /** `demo`: the title-screen world, which only drives the board (no toasts, saves or panels). */
+  private bindGame(g: Game = this.game, demo = false): void {
     for (const u of this.unsub) u();
     this.unsub = [];
-    const g = this.game;
     const on = g.events.on.bind(g.events);
     this.unsub.push(
       on('cells', (list) => {
         this.view.applyChanges(list);
+        if (demo) return;
         this.dirty = true;
+        if (this.hint) this.syncHint();
       }),
       on('settlement', (ev) => {
         const pal = PALETTES[resolveTheme(this.settings.theme)];
         this.view.pulse(ev.cells, ev.x, ev.y, ev.wrong === 0 ? pal.success : pal.error);
       }),
       on('hit', (h) => {
+        if (demo) {
+          const pal = PALETTES[resolveTheme(this.settings.theme)];
+          return this.view.blast(h.x, h.y, h.blast.r, pal.error, pal.warning);
+        }
         if (h.actor.kind === 'drone') this.toasts.show(t('toast.droneHit', { id: h.actor.id }), 'bad', 5000);
         else this.toasts.show(t('toast.hit', { loss: fmt(h.loss) }), 'bad');
         if (h.blast.disabled.length) this.toasts.show(t('toast.blast', { r: h.blast.r.toFixed(1), n: h.blast.disabled.length }), 'bad', 5000);
@@ -140,25 +239,29 @@ export class App {
       on('grand', (f) => {
         const mult = `×${f.bonus.toFixed(2)}`;
         this.view.grand(f.members, f.cx, f.cy, t('fx.grand', { m: mult }), PALETTES[resolveTheme(this.settings.theme)].accent);
-        this.toasts.show(t('toast.grand', { n: f.members.length, m: mult }), 'good', 4000);
+        if (!demo) this.toasts.show(t('toast.grand', { n: f.members.length, m: mult }), 'good', 4000);
       }),
       on('scanners', (list) => this.view.setScanners(list)),
-      on('drones', () => this.syncDrones()),
+      on('drones', () => this.syncDrones(g)),
       on('bases', () => {
         this.view.markBasesDirty();
-        if (this.panels.current === 'base') this.refreshPanel();
-      }),
-      on('econ', () => (this.dirty = true)),
-      on('log', () => {
-        if (this.panels.current === 'log') this.refreshPanel();
+        if (!demo && this.panels.current === 'base') this.refreshPanel();
       }),
     );
+    if (!demo) {
+      this.unsub.push(
+        on('econ', () => (this.dirty = true)),
+        on('log', () => {
+          if (this.panels.current === 'log') this.refreshPanel();
+        }),
+      );
+    }
     this.view.setScanners(g.scanners);
-    this.syncDrones();
+    this.syncDrones(g);
   }
 
-  private syncDrones(): void {
-    this.view.setDrones(this.game.drones.drones, this.game.droneRadius());
+  private syncDrones(g: Game = this.game): void {
+    this.view.setDrones(g.drones.drones, g.droneRadius());
   }
 
   private replaceGame(g: Game): void {
@@ -168,6 +271,7 @@ export class App {
     this.centerOnStart();
     this.dirty = true;
     this.refreshPanel();
+    this.syncHint();
   }
 
   // ------------------------------------------------------------------ input
@@ -175,10 +279,7 @@ export class App {
   private onPrimary(c: { x: number; y: number }): void {
     if (this.game.baseInfo(c.x, c.y)) return this.selectBase(cellKey(c.x, c.y));
     const s = this.game.cellState(c.x, c.y);
-    if (isRevealed(s)) {
-      this.game.chord(c.x, c.y);
-      return;
-    }
+    if (isRevealed(s)) return this.chord(c);
     if (this.settings.inputMode === 'toggle' && this.flagMode) {
       this.game.toggleFlag(c.x, c.y);
       return;
@@ -188,8 +289,18 @@ export class App {
 
   private onSecondary(c: { x: number; y: number }): void {
     const s = this.game.cellState(c.x, c.y);
-    if (isRevealed(s)) this.game.chord(c.x, c.y);
+    if (isRevealed(s)) this.chord(c);
     else this.game.toggleFlag(c.x, c.y);
+  }
+
+  /** Chording opens the neighbours in one ripple from the number, not one per neighbour. */
+  private chord(c: { x: number; y: number }): void {
+    this.view.rippleFrom = cellKey(c.x, c.y);
+    try {
+      this.game.chord(c.x, c.y);
+    } finally {
+      this.view.rippleFrom = null;
+    }
   }
 
   /** Pressing on a placed drone picks it up; it pauses until dropped. */
@@ -327,6 +438,7 @@ export class App {
     this.bindGame();
     this.centerOnStart();
     this.refreshPanel();
+    this.syncHint();
     void this.save(true);
   }
 
@@ -415,6 +527,10 @@ export class App {
       this.saving = false;
     }
   }
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 export { keyX, keyY };

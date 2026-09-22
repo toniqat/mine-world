@@ -158,6 +158,60 @@ button { cursor: pointer; }
 .modal .box p { margin: 0 0 14px; }
 .modal .buttons { display: flex; justify-content: flex-end; gap: 8px; }
 
+/* --- title screen --- */
+/* While the title is up the demo board is muted, and the chrome is out of sight. */
+#app.titling #stage canvas { filter: saturate(0.6) contrast(1.06) brightness(0.9); }
+:root[data-theme='light'] #app.titling #stage canvas { filter: saturate(0.6) contrast(1.02) brightness(0.97); }
+#stage canvas { transition: filter 600ms ease; }
+.hud, .statusbar { transition: transform 420ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 420ms ease; }
+#app.titling .hud, #app.intro .hud { transform: translateY(-100%); opacity: 0; pointer-events: none; }
+#app.titling .statusbar, #app.intro .statusbar { transform: translateY(100%); opacity: 0; pointer-events: none; }
+
+.title { position: absolute; inset: 0; z-index: 8; user-select: none; overflow: hidden; }
+.title-logo {
+  position: absolute; left: 0; right: 0; top: 16vh; margin: 0; text-align: center;
+  font: 700 clamp(40px, 9vw, 112px)/1 var(--font); letter-spacing: 0.16em; padding-left: 0.16em;
+  color: var(--fg); text-shadow: 0 2px 24px var(--bg), 0 0 2px var(--bg);
+  transition: transform 700ms cubic-bezier(0.55, 0, 0.75, 0.2), opacity 600ms ease;
+}
+.title-actions {
+  position: absolute; left: 0; right: 0; bottom: 14vh; display: flex; flex-direction: column; align-items: center; gap: 12px;
+  transition: transform 700ms cubic-bezier(0.55, 0, 0.75, 0.2), opacity 600ms ease;
+}
+.btn.title-start { height: 56px; min-width: min(280px, 80vw); padding: 0 32px; justify-content: center; font-size: 18px; letter-spacing: 0.04em; box-shadow: var(--shadow); }
+.btn.title-new { background: var(--surface); }
+.title.leaving .title-logo { transform: translateY(-50vh); opacity: 0; }
+.title.leaving .title-actions { transform: translateY(50vh); opacity: 0; }
+
+/* Film look over the demo: grain, scanlines, a faint flicker and a vignette. */
+.film { position: absolute; inset: 0; pointer-events: none; transition: opacity 600ms ease; }
+.title.leaving .film { opacity: 0; }
+.film > div { position: absolute; }
+.film-grain { inset: -64px; opacity: 0.09; mix-blend-mode: overlay; background-size: 128px 128px; animation: film-grain 0.9s steps(6) infinite; }
+:root[data-theme='light'] .film-grain { opacity: 0.12; mix-blend-mode: multiply; }
+.film-lines { inset: 0; background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px); }
+:root[data-theme='light'] .film-lines { background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 0 1px, transparent 1px 3px); }
+.film-flicker { inset: 0; background: #fff; opacity: 0; animation: film-flicker 5.3s infinite; }
+.film-vignette { inset: 0; background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, 0.55) 100%); }
+:root[data-theme='light'] .film-vignette { background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.22) 100%); }
+@keyframes film-grain {
+  0% { transform: translate(0, 0); } 17% { transform: translate(-22px, 14px); } 33% { transform: translate(18px, -26px); }
+  50% { transform: translate(-30px, -8px); } 67% { transform: translate(10px, 30px); } 83% { transform: translate(28px, 6px); } 100% { transform: translate(0, 0); }
+}
+@keyframes film-flicker {
+  0%, 100% { opacity: 0; } 3% { opacity: 0.025; } 5% { opacity: 0; } 41% { opacity: 0; } 42% { opacity: 0.018; } 44% { opacity: 0.004; } 71% { opacity: 0; } 72% { opacity: 0.03; } 73% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .film-grain, .film-flicker { animation: none; }
+}
+
+.start-hint {
+  position: absolute; left: 50%; bottom: 56px; transform: translate(-50%, 8px); z-index: 7; pointer-events: none;
+  padding: 8px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow);
+  font-size: 13px; color: var(--fg-muted); opacity: 0; transition: opacity 300ms ease, transform 300ms ease; white-space: nowrap;
+}
+.start-hint.show { opacity: 1; transform: translate(-50%, 0); }
+
 @media (max-width: 720px) {
   .hud { grid-template-columns: auto 1fr auto; gap: 6px; padding: 0 6px; }
   .hud .stat.income, .hud .btn .text { display: none; }
