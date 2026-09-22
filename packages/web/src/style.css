@@ -47,7 +47,7 @@ button { cursor: pointer; }
 #stage { position: absolute; inset: 0; }
 #stage canvas { display: block; touch-action: none; }
 
-/* --- HUD: three floating capsules, no bar --- */
+/* --- HUD: floating capsules, no bar: the pool (top centre), credits + buttons (top right) --- */
 .hud {
   position: absolute; top: 10px; left: 12px; right: 12px; height: 44px;
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: start; gap: 10px;
@@ -64,9 +64,11 @@ button { cursor: pointer; }
 .pill .sub { font: 11px/1.2 var(--mono); color: var(--fg-muted); margin-left: 6px; }
 .pill .stat { display: flex; flex-direction: column; justify-content: center; }
 .pill .amount { display: flex; align-items: baseline; white-space: nowrap; }
-.pill.credits { justify-self: start; flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; min-width: 120px; }
+.hud-right { grid-column: 3; justify-self: end; display: flex; align-items: start; gap: 10px; }
+.pill.credits { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; min-width: 120px; }
 .pill.credits.gaining .value { animation: credit-gain 700ms ease-out; }
-.pill.pool { justify-self: center; padding-right: 5px; }
+.pill.pool { grid-column: 2; justify-self: center; padding-right: 5px; }
+.pill .stat.combo { position: relative; }
 .pill.pool .value { color: var(--accent); }
 .pill.pool .cap { font: 11px/1.2 var(--mono); color: var(--fg-muted); }
 .pill.pool .bar { height: 2px; margin-top: 3px; border-radius: 1px; background: var(--border); overflow: hidden; min-width: 96px; }
@@ -76,7 +78,7 @@ button { cursor: pointer; }
 .pill.pool.full .value { color: var(--warning); }
 .pill.pool.full .cashout { animation: cashout-pulse 1.2s ease-in-out infinite; }
 .pill.pool.shake { animation: pill-shake 360ms ease; }
-.pill.menu { justify-self: end; gap: 2px; padding: 0 6px; }
+.pill.menu { gap: 2px; padding: 0 6px; }
 .pill .cashout { height: 34px; border-radius: 17px; padding: 0 16px; }
 .pill .btn.icon { border-radius: 50%; width: 34px; height: 34px; }
 /* What the pool gains (or loses) floats up out of it. */
@@ -108,7 +110,8 @@ button { cursor: pointer; }
 .btn.small { height: 24px; padding: 0 8px; font-size: 12px; }
 .btn.danger { border-color: var(--error); color: var(--error); }
 .cashout { min-width: 96px; }
-.btn.icon.active { color: var(--accent); }
+/* The button of the open popover (and flag mode) sits in a blue circle. */
+.btn.icon.active, .btn.icon.active:hover { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
 
 /* --- popover (base / settings): drops from under the top-right capsule --- */
 .panel {
@@ -214,27 +217,17 @@ button { cursor: pointer; }
 .demo-black { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
 .title.leaving .demo-black { opacity: 0 !important; transition: opacity 600ms ease; }
 
-/* Film look over the demo: grain, scanlines, a faint flicker and a vignette. */
+/* Film look over the demo: grain, scanlines, a faint flicker and a vignette. Grain and flicker are moved at random from title.ts (a CSS loop reads as a regular wobble). */
 .film { position: absolute; inset: 0; pointer-events: none; transition: opacity 600ms ease; }
 .title.leaving .film { opacity: 0; }
 .film > div { position: absolute; }
-.film-grain { inset: -64px; opacity: 0.09; mix-blend-mode: overlay; background-size: 128px 128px; animation: film-grain 0.9s steps(6) infinite; }
-:root[data-theme='light'] .film-grain { opacity: 0.12; mix-blend-mode: multiply; }
+.film-grain { inset: -128px; opacity: 0.07; mix-blend-mode: overlay; background-size: 128px 128px; will-change: transform; }
+:root[data-theme='light'] .film-grain { opacity: 0.1; mix-blend-mode: multiply; }
 .film-lines { inset: 0; background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.14) 0 1px, transparent 1px 3px); }
 :root[data-theme='light'] .film-lines { background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 0 1px, transparent 1px 3px); }
-.film-flicker { inset: 0; background: #fff; opacity: 0; animation: film-flicker 5.3s infinite; }
+.film-flicker { inset: 0; background: #fff; opacity: 0; transition: opacity 90ms linear; }
 .film-vignette { inset: 0; background: radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, 0.55) 100%); }
 :root[data-theme='light'] .film-vignette { background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.22) 100%); }
-@keyframes film-grain {
-  0% { transform: translate(0, 0); } 17% { transform: translate(-22px, 14px); } 33% { transform: translate(18px, -26px); }
-  50% { transform: translate(-30px, -8px); } 67% { transform: translate(10px, 30px); } 83% { transform: translate(28px, 6px); } 100% { transform: translate(0, 0); }
-}
-@keyframes film-flicker {
-  0%, 100% { opacity: 0; } 3% { opacity: 0.025; } 5% { opacity: 0; } 41% { opacity: 0; } 42% { opacity: 0.018; } 44% { opacity: 0.004; } 71% { opacity: 0; } 72% { opacity: 0.03; } 73% { opacity: 0; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .film-grain, .film-flicker { animation: none; }
-}
 
 .start-hint {
   position: absolute; left: 50%; bottom: 40px; transform: translate(-50%, 8px); z-index: 7; pointer-events: none;
@@ -244,7 +237,8 @@ button { cursor: pointer; }
 .start-hint.show { opacity: 1; transform: translate(-50%, 0); }
 
 @media (max-width: 720px) {
-  .hud { left: 6px; right: 6px; top: 6px; gap: 6px; grid-template-columns: auto 1fr auto; }
+  .hud { left: 6px; right: 6px; top: 6px; gap: 6px; grid-template-columns: 0 1fr auto; }
+  .hud-right { gap: 6px; }
   .pill { padding: 0 10px; gap: 8px; }
   .pill.credits { min-width: 0; }
   .pill.pool .bar { min-width: 56px; }

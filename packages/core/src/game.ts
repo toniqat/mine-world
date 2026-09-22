@@ -46,11 +46,19 @@ export interface HitEvent {
   blast: BlastEvent;
 }
 
-/** The explosion a hit sets off: every base within `r` of the mine is disabled (never the main base). */
+/**
+ * The explosion a hit sets off: every base within `r` of the mine is disabled
+ * (never the main base) and every flag inside is lifted; a flag that sat on a
+ * mine goes off too (`chain`), with a blast of its own.
+ */
 export interface BlastEvent {
   r: number;
-  /** Bases disabled by this blast. */
+  /** Bases disabled by this blast and its chain. */
   disabled: number[];
+  /** Flags lifted from safe cells by this blast and its chain. */
+  cleared: number;
+  /** Flagged mines set off in a chain, in the order they went off, with their blast radii. */
+  chain: Array<{ x: number; y: number; r: number }>;
 }
 
 /**
@@ -346,7 +354,7 @@ export class Game {
       if (actor.kind === 'drone') {
         this.pushLog('drone_explode', x, y, { drone: actor.id, loss, basis: basis ?? [], disabled: blast.disabled.length });
       } else {
-        this.pushLog('hit', x, y, { loss, r: blast.r, disabled: blast.disabled.length });
+        this.pushLog('hit', x, y, { loss, r: blast.r, disabled: blast.disabled.length, chain: blast.chain.length, cleared: blast.cleared });
       }
       this.events.emit('hit', { x, y, actor, loss, blast });
       result = { hit: true, revealed: 0, intervened: false };
@@ -469,19 +477,46 @@ export class Game {
   }
 
   /**
-   * A mine went off at (x, y): roll the blast radius for its distance from
-   * the main base and disable every base inside (the main base is immune).
+   * A mine went off at (x, y): roll the blast radius for its mining tier,
+   * disable every base inside (the main base is immune) and lift every flag
+   * inside. A lifted flag that sat on a mine goes off as well (Exploded, not
+   * repairable) and blasts in turn; only the first mine burns unbanked funds.
    */
   private explode(x: number, y: number): BlastEvent {
-    const r = blastRadius(this.cfg.blast, this.tierAt(x, y), this.cfg.seed, x, y, this.econ.lifetime.hits);
-    const disabled: number[] = [];
-    for (const [k, m] of this.econ.owned) {
-      if (m.disabled || !inBlast(keyX(k) - x, keyY(k) - y, r)) continue;
-      m.disabled = true;
-      disabled.push(k);
+    const hits = this.econ.lifetime.hits;
+    const ev: BlastEvent = { r: 0, disabled: [], cleared: 0, chain: [] };
+    const queue: Array<[number, number]> = [[x, y]];
+    for (let i = 0; i < queue.length; i++) {
+      const [bx, by] = queue[i];
+      const r = blastRadius(this.cfg.blast, this.tierAt(bx, by), this.cfg.seed, bx, by, hits + i);
+      if (i === 0) ev.r = r;
+      else ev.chain.push({ x: bx, y: by, r });
+      for (const [k, m] of this.econ.owned) {
+        if (m.disabled || !inBlast(keyX(k) - bx, keyY(k) - by, r)) continue;
+        m.disabled = true;
+        ev.disabled.push(k);
+      }
+      const n = Math.ceil(r);
+      for (let dy = -n; dy <= n; dy++) {
+        for (let dx = -n; dx <= n; dx++) {
+          const fx = bx + dx;
+          const fy = by + dy;
+          if (!inBlast(dx, dy, r) || this.board.get(fx, fy) !== CellState.Flag) continue;
+          // What the blast shows (mine or not) is observed truth: pin it.
+          const mine = this.world.truth(fx, fy) === 1;
+          this.world.commit(cellKey(fx, fy), mine ? 1 : 0);
+          if (mine) {
+            this.setCell(fx, fy, CellState.Exploded);
+            queue.push([fx, fy]);
+          } else {
+            this.setCell(fx, fy, CellState.Unknown);
+            ev.cleared++;
+          }
+        }
+      }
     }
-    if (disabled.length) this.basesDirty = true;
-    return { r, disabled };
+    if (ev.disabled.length) this.basesDirty = true;
+    return ev;
   }
 
   /** Bring a disabled base back for `repairCost()` credits. */
@@ -740,14 +775,12 @@ export class Game {
     // lifting a flag cannot: the network treats a flag exactly like Unknown.
     if (!this.basesDirty && this.econ.owned.size && this.changed.some((c) => c.state !== CellState.Unknown && c.state !== CellState.Flag)) this.basesDirty = true;
     // One player action that changes tiles (an opening, a chord that opens
-    // something, placing a flag) is one turn: every linked complex sends a
-    // (cosmetic) shipment, over the network as it stood before the action (no
-    // forced rebuild: that costs a full path search per action). The point
-    // multiplier is read from the same network: new bases count from the
-    // next rebuild.
+    // something, placing a flag) is one turn. The point multiplier is read
+    // from the network as it stood before the action (no forced rebuild: that
+    // costs a full path search per action): new bases count from the next
+    // rebuild. Shipments run on their own clocks (`Bases.tick`).
     if (this.turnPending) {
       this.turnPending = false;
-      this._bases.turn();
       this.events.emit('econ', this.econ);
     }
     // Fog first, so the renderer lifts it before the opened cells fade in.

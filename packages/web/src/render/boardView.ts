@@ -1,5 +1,5 @@
 import { Container, Graphics, Sprite, Text, type Application, type Texture } from 'pixi.js';
-import { CHUNK, CellState, cellKey, hash01, inBlast, inDisc, isRevealed, keyX, keyY, numberOf, type CellChange, type DroneState, type Game, type ScannerInfo, type Shipment } from '@mine/core';
+import { CHUNK, CellState, cellKey, hash01, inBlast, inDisc, isKnownMine, isRevealed, keyX, keyY, numberOf, type CellChange, type DroneState, type Game, type ScannerInfo, type Shipment } from '@mine/core';
 import { hex, type Palette } from '../theme';
 import type { Camera } from './camera';
 import { CELL, buildTextures, destroyTextures, stateTexture, type CellTextures } from './textures';
@@ -19,8 +19,10 @@ const COVER_MS = 200;
 /** ...starting this much later per cell of distance from the cell that was clicked. */
 const COVER_STEP_MS = 13;
 const MAX_COVERS = 1500;
-/** Fog lifting from a cell fades out over this long. */
+/** Fog lifting from a cell fades out over this long... */
 const FOG_LIFT_MS = 600;
+/** ...starting this much later per cell of distance from where it lifted (the clicked cell, or the lifted area's centre). */
+const FOG_STEP_MS = 28;
 const MARK_IN_MS = 110;
 const MARK_OUT_MS = 70;
 const PULSE_MS = 240;
@@ -65,6 +67,19 @@ function finishOf(game: Game, x: number, y: number): Finish {
   return flag ? Finish.Dim : Finish.Done;
 }
 
+/** More flags and known mines (bases included) around (x, y) than its number says: a flag is wrong. */
+function overFlagged(game: Game, x: number, y: number, n: number): boolean {
+  let m = 0;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const s = game.cellState(x + dx, y + dy);
+      if (s === CellState.Flag || isKnownMine(s)) m++;
+    }
+  }
+  return m > n;
+}
+
 interface MarkAnim {
   key: number;
   sprite: Sprite;
@@ -79,6 +94,16 @@ interface CellFx {
   start: number;
   /** Duration. */
   ms: number;
+  /**
+   * The cell came out of fog: its tile is hidden and fades in under the cover
+   * (the faint fog tile alone would show the tile underneath at once).
+   */
+  hideBg?: boolean;
+  /**
+   * A cell that was already opened when its fog lifted: while the fog fades it
+   * shows this closed tile, then it flips open at `start` like any reveal.
+   */
+  then?: { tex: Texture; start: number };
 }
 
 interface DigitFade {
@@ -125,6 +150,14 @@ interface GrandFx {
   r: number;
   color: number;
   label: Text;
+  start: number;
+}
+
+/** Points a new base earned, rising from its tile and fading. */
+interface FloatFx {
+  label: Text;
+  x: number;
+  y: number;
   start: number;
 }
 
@@ -220,8 +253,11 @@ class ChunkView {
       const done = f === Finish.Done;
       this.done[i] = done ? 1 : 0;
       this.dim[i] = f === Finish.Dim ? 1 : 0;
-      d.texture = tex.digits[numberOf(s)];
-      d.alpha = f === Finish.Dim ? DIGIT_DIM_ALPHA : 1;
+      // An over-flagged number stays red at full strength until a flag is lifted.
+      const over = overFlagged(game, x, y, numberOf(s));
+      if (over) this.dim[i] = 0;
+      d.texture = (over ? tex.digitsOver : tex.digits)[numberOf(s)];
+      d.alpha = this.dim[i] ? DIGIT_DIM_ALPHA : 1;
       d.visible = !done;
       return done && !wasDone;
     }
@@ -292,6 +328,7 @@ export class BoardView {
   private trails: Trail[] = [];
   private blasts: Blast[] = [];
   private grands: GrandFx[] = [];
+  private floats: FloatFx[] = [];
   /** Labels of grand-complex effects. */
   private readonly fxLabels = new Container();
   private vis = { x0: 0, y0: 0, x1: -1, y1: -1 };
@@ -307,8 +344,14 @@ export class BoardView {
   private introFx: { start: number; end: number; settled: boolean } | null = null;
   /** When set, reveals ripple out from this cell instead of each cascade's own start (a chord). */
   rippleFrom: number | null = null;
+  /** When the last fog lift finishes fading. */
+  private fogEnd = 0;
   private digitsVisible = true;
   private lastVisible = { x0: 0, y0: 0, x1: -1, y1: -1 };
+  /** Chunks around the visible ones still to be built ahead of time (a few per frame). */
+  private prefetch: number[] = [];
+  /** Camera of the last frame, to tell a moving camera from a still one. */
+  private lastCam = { x: NaN, y: NaN, zoom: NaN };
   private overlayDirty = true;
 
   constructor(
@@ -348,6 +391,7 @@ export class BoardView {
     for (const c of this.chunks.values()) c.destroy();
     this.chunks.clear();
     this.lastVisible = { x0: 0, y0: 0, x1: -1, y1: -1 };
+    this.prefetch = [];
     this.probabilities = null;
     this.drones = [];
     this.scanners = [];
@@ -360,6 +404,8 @@ export class BoardView {
     this.blasts = [];
     for (const f of this.grands) f.label.destroy();
     this.grands = [];
+    for (const f of this.floats) f.label.destroy();
+    this.floats = [];
     this.pulses = [];
     for (const m of this.marks) this.releaseMark(m);
     this.marks = [];
@@ -392,11 +438,6 @@ export class BoardView {
 
   applyChanges(list: CellChange[]): void {
     const now = performance.now();
-    // Terrain exists only once the first click set the start: repaint what is already on screen.
-    if (!this.terrainShown && this.game.world.started) {
-      this.terrainShown = true;
-      for (const c of this.chunks.values()) c.refresh(this.tex, this.game);
-    }
     // Changed cells and their neighbours: a neighbouring number may have become done.
     const touched = new Set<number>();
     for (const c of list) {
@@ -410,12 +451,21 @@ export class BoardView {
           // Reveals ripple outwards from the clicked cell (a cascade's start, or the chorded number).
           const from = this.rippleFrom ?? c.from;
           const delay = from === undefined ? 0 : Math.hypot(c.x - keyX(from), c.y - keyY(from)) * COVER_STEP_MS;
-          // The tile it showed (tier tint, "?", flag) flips away.
-          const was = v.bg[((c.y & 15) << 4) | (c.x & 15)].texture;
-          this.startCover(k, was, now + delay, COVER_MS);
+          // A cell whose fog is still lifting (the first click's start area) flips
+          // out of the fog when the fog wave reaches it.
+          const fog = this.covers.find((f) => f.key === k && f.hideBg && f.ms !== COVER_MS);
+          if (fog) this.holdClosed(fog, this.fogEnd + delay);
+          // Otherwise the tile it showed (tier tint, "?", flag) flips away.
+          else this.startCover(k, v.bg[((c.y & 15) << 4) | (c.x & 15)].texture, now + delay, COVER_MS);
         }
       }
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) touched.add(cellKey(c.x + dx, c.y + dy));
+    }
+    // Terrain exists only once the first click set the start: repaint what is
+    // already on screen (after the loop above, which needs the old states).
+    if (!this.terrainShown && this.game.world.started) {
+      this.terrainShown = true;
+      for (const c of this.chunks.values()) c.refresh(this.tex, this.game);
     }
     for (const k of touched) this.paintCell(keyX(k), keyY(k), now);
     // The hovered cell may have been flagged, marked "?" or opened.
@@ -485,14 +535,43 @@ export class BoardView {
   }
 
   /** The fog of war lifted from these cells: repaint them under a fading fog cover. */
-  liftFog(keys: number[]): void {
+  liftFog(keys: number[], from?: number): void {
+    if (!keys.length) return;
     const now = performance.now();
+    // It spreads outwards from `from` (else the area's centre), timed from its nearest cell.
+    let ox = 0;
+    let oy = 0;
+    if (from !== undefined) {
+      ox = keyX(from);
+      oy = keyY(from);
+    } else {
+      for (const k of keys) {
+        ox += keyX(k);
+        oy += keyY(k);
+      }
+      ox /= keys.length;
+      oy /= keys.length;
+    }
+    let dMin = Infinity;
+    for (const k of keys) dMin = Math.min(dMin, Math.hypot(keyX(k) - ox, keyY(k) - oy));
+    const delayOf = (x: number, y: number) => (Math.hypot(x - ox, y - oy) - dMin) * FOG_STEP_MS + hash01(7, x, y) * 60;
+    // Cells already opened when their fog lifts (the first click's start area)
+    // come out of the fog closed and flip open once the whole fog has lifted,
+    // in a ripple from the same origin.
+    let fogEnd = now;
+    for (const k of keys) fogEnd = Math.max(fogEnd, now + delayOf(keyX(k), keyY(k)) + FOG_LIFT_MS);
+    // Cells this action opens may arrive after the fog event: they wait for the same end.
+    this.fogEnd = fogEnd;
     for (const k of keys) {
       const x = keyX(k);
       const y = keyY(k);
       if (!this.chunks.has(cellKey(x >> 4, y >> 4))) continue;
-      this.startCover(k, this.tex.fog, now + hash01(7, x, y) * 120, FOG_LIFT_MS);
       this.paintCell(x, y);
+      this.startCover(k, this.tex.fog, now + delayOf(x, y), FOG_LIFT_MS, true);
+      if (isRevealed(this.game.cellState(x, y))) {
+        const c = this.covers.find((f) => f.key === k);
+        if (c) this.holdClosed(c, fogEnd + Math.hypot(x - ox, y - oy) * COVER_STEP_MS);
+      }
     }
     this.overlayDirty = true;
   }
@@ -508,7 +587,7 @@ export class BoardView {
    * Cover a cell with `tex` from `start` for `ms`. A reveal (`COVER_MS`) flips: the
    * cover folds away, then the cell's number unfolds; anything else (fog) fades out.
    */
-  private startCover(key: number, tex: Texture, start: number, ms: number): void {
+  private startCover(key: number, tex: Texture, start: number, ms: number, hideBg = false): void {
     const old = this.covers.findIndex((c) => c.key === key);
     if (old >= 0) {
       this.releaseCover(this.covers[old]);
@@ -524,7 +603,8 @@ export class BoardView {
     sprite.tint = 0xffffff;
     sprite.visible = true;
     this.coverLayer.addChild(sprite);
-    this.covers.push({ key, sprite, start, ms });
+    this.covers.push({ key, sprite, start, ms, hideBg });
+    if (hideBg) this.bgAlpha(key, 0);
     if (ms === COVER_MS) {
       const d = this.digitSprite(key);
       if (d) d.scale.x = 0;
@@ -534,6 +614,9 @@ export class BoardView {
   private releaseCover(c: CellFx): void {
     const d = this.digitSprite(c.key);
     if (d) d.scale.set(1);
+    if (c.hideBg) this.bgAlpha(c.key, 1);
+    // Cut short while it still showed the closed tile: paint the real one.
+    if (c.then) this.paintCell(keyX(c.key), keyY(c.key));
     c.sprite.visible = false;
     this.coverLayer.removeChild(c.sprite);
     this.coverPool.push(c.sprite);
@@ -543,6 +626,20 @@ export class BoardView {
     if (!this.covers.length) return;
     this.covers = this.covers.filter((c) => {
       const t = (now - c.start) / c.ms;
+      if (t >= 1 && c.then) {
+        // The fog is gone: the closed tile it showed now flips open.
+        this.bgAlpha(c.key, 1);
+        this.paintCell(keyX(c.key), keyY(c.key));
+        c.sprite.texture = c.then.tex;
+        c.sprite.alpha = 1;
+        c.start = c.then.start;
+        c.ms = COVER_MS;
+        c.hideBg = false;
+        c.then = undefined;
+        const d = this.digitSprite(c.key);
+        if (d) d.scale.x = 0;
+        return true;
+      }
       if (t >= 1) {
         this.releaseCover(c);
         return false;
@@ -550,6 +647,9 @@ export class BoardView {
       if (t <= 0) return true;
       if (c.ms !== COVER_MS) {
         c.sprite.alpha = 1 - t * t;
+        if (c.hideBg) this.bgAlpha(c.key, t * (2 - t));
+        // A repaint may have put the opened tile back: keep it closed until it flips.
+        if (c.then) this.bgTexture(c.key, c.then.tex);
         return true;
       }
       // First half: the cover folds to an edge, darkening as it turns away.
@@ -562,11 +662,34 @@ export class BoardView {
         c.sprite.tint = (shade << 16) | (shade << 8) | shade;
       } else {
         c.sprite.visible = false;
+        if (c.hideBg) this.bgAlpha(c.key, (t - 0.5) / 0.5);
         const d = this.digitSprite(c.key);
         if (d) d.scale.x = Math.sin(((t - 0.5) / 0.5) * (Math.PI / 2));
       }
       return true;
     });
+  }
+
+  /** A cell opened under a lifting fog shows a closed tile until the fog is gone, then flips open at `start`. */
+  private holdClosed(c: CellFx, start: number): void {
+    c.then = { tex: this.tex.unknown, start };
+    this.bgTexture(c.key, this.tex.unknown);
+    const d = this.digitSprite(c.key);
+    if (d) d.scale.x = 0;
+  }
+
+  private bgTexture(key: number, tex: Texture): void {
+    const x = keyX(key);
+    const y = keyY(key);
+    const v = this.chunks.get(cellKey(x >> 4, y >> 4));
+    if (v) v.bg[((y & 15) << 4) | (x & 15)].texture = tex;
+  }
+
+  private bgAlpha(key: number, a: number): void {
+    const x = keyX(key);
+    const y = keyY(key);
+    const v = this.chunks.get(cellKey(x >> 4, y >> 4));
+    if (v) v.bg[((y & 15) << 4) | (x & 15)].alpha = a;
   }
 
   private digitSprite(key: number): Sprite | null {
@@ -665,10 +788,8 @@ export class BoardView {
     const y = keyY(key);
     const v = this.chunks.get(cellKey(x >> 4, y >> 4));
     if (!v) return;
-    const s = v.bg[((y & 15) << 4) | (x & 15)];
-    const off = (CELL * (1 - k)) / 2;
-    s.scale.set(k);
-    s.position.set((x & 15) * CELL + off, (y & 15) * CELL + off);
+    // Tiles are centre-anchored, so scaling alone keeps them in place.
+    v.bg[((y & 15) << 4) | (x & 15)].scale.set(k);
   }
 
   private updatePresses(now: number): void {
@@ -694,8 +815,27 @@ export class BoardView {
     this.pulses.push({ keys, cx, cy, color, start, end: start + maxD * PULSE_STEP_MS + PULSE_MS });
   }
 
-  /** Mine explosion at (x, y) with radius r (tiles): the tiles `inBlast` flash from `hot` to `color`, centre first. */
-  blast(x: number, y: number, r: number, color: number, hot: number): void {
+  /**
+   * A mine explosion and its chain: each flagged mine it set off blasts once
+   * the wave of an earlier blast reaches it.
+   */
+  explosion(x: number, y: number, r: number, chain: ReadonlyArray<{ x: number; y: number; r: number }>, color: number, hot: number): void {
+    const done = [{ x, y, r, at: 0 }];
+    this.blast(x, y, r, color, hot);
+    for (const c of chain) {
+      let at = Infinity;
+      for (const b of done) {
+        const d = Math.hypot(c.x - b.x, c.y - b.y);
+        if (d <= b.r + 0.5) at = Math.min(at, b.at + d * BLAST_STEP_MS);
+      }
+      if (at === Infinity) at = done[done.length - 1].at;
+      done.push({ ...c, at });
+      this.blast(c.x, c.y, c.r, color, hot, at);
+    }
+  }
+
+  /** Mine explosion at (x, y) with radius r (tiles): the tiles `inBlast` flash from `hot` to `color`, centre first, after `delay` ms. */
+  blast(x: number, y: number, r: number, color: number, hot: number, delay = 0): void {
     const tiles: Blast['tiles'] = [];
     const n = Math.ceil(r);
     let maxD = 0;
@@ -708,7 +848,7 @@ export class BoardView {
         maxD = Math.max(maxD, d);
       }
     }
-    const start = performance.now();
+    const start = performance.now() + delay;
     this.blasts.push({ tiles, color, hot, start, end: start + maxD * BLAST_STEP_MS + BLAST_TILE_MS });
   }
 
@@ -726,6 +866,17 @@ export class BoardView {
     label.position.set(cx * CELL, cy * CELL);
     this.fxLabels.addChild(label);
     this.grands.push({ cx, cy, r: r + 1, color, label, start: performance.now() });
+  }
+
+  /** `text` (the points a base earned) rises from the tile (x, y) and fades. */
+  floatText(x: number, y: number, text: string, color: number): void {
+    const label = new Text({ text, style: { fontFamily: 'Cascadia Code, SF Mono, Consolas, monospace', fontSize: 12, fontWeight: '700', fill: color } });
+    label.anchor.set(0.5);
+    label.resolution = 2;
+    label.position.set((x + 0.5) * CELL, (y + 0.5) * CELL);
+    label.alpha = 0;
+    this.fxLabels.addChild(label);
+    this.floats.push({ label, x, y, start: performance.now() });
   }
 
   /** Time since the game last ticked drones, so lines and gauges move smoothly between ticks. */
@@ -807,11 +958,23 @@ export class BoardView {
     this.overlayDirty = true;
   }
 
+  private addChunk(cx: number, cy: number, digits: boolean): void {
+    const v = new ChunkView(cx, cy, this.tex, this.game);
+    v.setDigitsVisible(digits);
+    this.chunks.set(cellKey(cx, cy), v);
+    this.chunkLayer.addChild(v.root);
+  }
+
   /** Called every frame. */
   update(cam: Camera): void {
     this.root.scale.set(cam.zoom);
     const c = cam.worldToScreen(0, 0);
-    this.root.position.set(Math.round(c.x), Math.round(c.y));
+    // A still board snaps to whole pixels (crisp edges); a moving one keeps its
+    // sub-pixel position, or a slow pan advances in visible 1 px steps.
+    const moving = cam.x !== this.lastCam.x || cam.y !== this.lastCam.y || cam.zoom !== this.lastCam.zoom;
+    this.lastCam = { x: cam.x, y: cam.y, zoom: cam.zoom };
+    if (moving) this.root.position.set(c.x, c.y);
+    else this.root.position.set(Math.round(c.x), Math.round(c.y));
 
     const vis = cam.visibleCells();
     this.vis = vis;
@@ -826,23 +989,28 @@ export class BoardView {
     const cy1 = vis.y1 >> 4;
     if (cx0 !== this.lastVisible.x0 || cy0 !== this.lastVisible.y0 || cx1 !== this.lastVisible.x1 || cy1 !== this.lastVisible.y1) {
       this.lastVisible = { x0: cx0, y0: cy0, x1: cx1, y1: cy1 };
+      // Keep a ring of one chunk around the visible ones (built ahead, a few per
+      // frame, so a pan never builds a whole row of chunks in the frame it needs them).
       for (const [k, v] of this.chunks) {
-        if (v.cx < cx0 || v.cx > cx1 || v.cy < cy0 || v.cy > cy1) {
+        if (v.cx < cx0 - 1 || v.cx > cx1 + 1 || v.cy < cy0 - 1 || v.cy > cy1 + 1) {
           v.destroy();
           this.chunks.delete(k);
         }
       }
-      for (let cy = cy0; cy <= cy1; cy++) {
-        for (let cx = cx0; cx <= cx1; cx++) {
-          const k = cellKey(cx, cy);
-          if (this.chunks.has(k)) continue;
-          const v = new ChunkView(cx, cy, this.tex, this.game);
-          v.setDigitsVisible(digits);
-          this.chunks.set(k, v);
-          this.chunkLayer.addChild(v.root);
+      this.prefetch = [];
+      for (let cy = cy0 - 1; cy <= cy1 + 1; cy++) {
+        for (let cx = cx0 - 1; cx <= cx1 + 1; cx++) {
+          if (this.chunks.has(cellKey(cx, cy))) continue;
+          if (cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1) this.addChunk(cx, cy, digits);
+          else this.prefetch.push(cellKey(cx, cy));
         }
       }
       this.overlayDirty = true;
+    } else if (this.prefetch.length) {
+      for (let n = 0; n < 2 && this.prefetch.length; n++) {
+        const k = this.prefetch.pop()!;
+        if (!this.chunks.has(k)) this.addChunk(keyX(k), keyY(k), digits);
+      }
     }
     if (this.highlight && performance.now() > this.highlight.until) {
       this.highlight = null;
@@ -859,7 +1027,7 @@ export class BoardView {
     this.updatePresses(now);
     this.updateDigitFades(now);
     this.drawFx(now);
-    this.drawShipments(now);
+    this.drawShipments(now, cam.zoom);
     this.drawDrones(now);
   }
 
@@ -885,6 +1053,19 @@ export class BoardView {
         const smooth = (v: number) => v * v * (3 - 2 * v);
         f.label.alpha = t < 0.15 ? smooth(t / 0.15) : t > 0.7 ? 1 - smooth((t - 0.7) / 0.3) : 1;
         f.label.position.set(x, y - smooth(Math.min(1, t / 0.7)) * CELL * 0.8);
+        return true;
+      });
+    }
+    if (this.floats.length) {
+      const smooth = (v: number) => v * v * (3 - 2 * v);
+      this.floats = this.floats.filter((f) => {
+        const t = (now - f.start) / FLOAT_MS;
+        if (t >= 1) {
+          f.label.destroy();
+          return false;
+        }
+        f.label.alpha = t < 0.15 ? smooth(t / 0.15) : t > 0.6 ? 1 - smooth((t - 0.6) / 0.4) : 1;
+        f.label.position.set((f.x + 0.5) * CELL, (f.y + 0.5) * CELL - smooth(Math.min(1, t / 0.8)) * CELL * 0.9);
         return true;
       });
     }
@@ -1179,11 +1360,19 @@ export class BoardView {
    * to the next edge) leaves its trail behind as an afterimage that fades
    * out in place instead of vanishing with it. Inside a complex (two or more
    * bases) goods are not drawn: they seem to leave through the border and
-   * arrive at it, although they really run between member bases.
+   * arrive at it, although they really run between member bases. Zoomed
+   * out they fade (`SHIP_FADE_ZOOM`) and below `SHIP_MIN_ZOOM` they are not
+   * drawn at all (too many edges on screen).
    */
-  private drawShipments(now: number): void {
+  private drawShipments(now: number, zoom: number): void {
     const g = this.shipGfx;
     g.clear();
+    if (zoom < SHIP_MIN_ZOOM) {
+      this.shipSeen.clear();
+      this.trails = [];
+      return;
+    }
+    const zf = Math.min(1, (zoom - SHIP_MIN_ZOOM) / (SHIP_FADE_ZOOM - SHIP_MIN_ZOOM));
     const bases = this.game.bases;
     const net = (this.net ??= buildNet(bases));
     const live = bases.shipments;
@@ -1194,13 +1383,13 @@ export class BoardView {
     this.shipSeen = new Set(live);
     if (!live.length && !this.trails.length) return;
     const ahead = this.droneTiming.pending * bases.speed();
-    for (const s of live) if (this.edgeVisible(s.path)) this.drawShipment(g, net, s.path, s.len, Math.min(s.len, s.d + ahead), 1);
+    for (const s of live) if (this.edgeVisible(s.path)) this.drawShipment(g, net, s.path, s.len, Math.min(s.len, s.d + ahead), zf);
     if (this.trails.length) {
       this.trails = this.trails.filter((tr) => now - tr.start < TRAIL_FADE_MS);
       for (const tr of this.trails) {
         if (!this.edgeVisible(tr.path)) continue;
         const u = (now - tr.start) / TRAIL_FADE_MS;
-        this.drawShipment(g, net, tr.path, tr.len, tr.len, 1 - u * u * (3 - 2 * u));
+        this.drawShipment(g, net, tr.path, tr.len, tr.len, zf * (1 - u * u * (3 - 2 * u)));
       }
     }
   }
@@ -1273,6 +1462,11 @@ const COMPLEX_ALPHA = 0.08;
 const COMPLEX_BORDER = 1.5;
 const COMPLEX_RADIUS = 6;
 const COMPLEX_BORDER_ALPHA = 0.3;
+/** Shipments fade out as the view zooms out below `SHIP_FADE_ZOOM` and are not drawn below `SHIP_MIN_ZOOM`. */
+const SHIP_FADE_ZOOM = 0.6;
+const SHIP_MIN_ZOOM = 0.35;
+/** A base's points rise from its tile over this long. */
+const FLOAT_MS = 1300;
 /** A shipment's trail fades out over this long after it arrives. */
 const TRAIL_FADE_MS = 900;
 /** A blast reaches one tile further out every this many ms; each tile's flash and scorch last this long. */

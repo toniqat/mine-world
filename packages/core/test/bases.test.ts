@@ -149,7 +149,7 @@ describe('bases', () => {
     expect(b.complexes.get(b.complexOf.get(cellKey(10, 10))!)!.members.length).toBe(6);
   });
 
-  it('bases next to the main base join the main complex and count at once; a turn pays nothing', () => {
+  it('bases next to the main base join the main complex and count at once; time pays nothing', () => {
     const cfg = makeConfig({} as never);
     const econ = new Econ(cfg.econ, cfg.world.densityMin);
     const b = new Bases(cfg.bases, econ, (x, y) => (econ.owned.has(cellKey(x, y)) ? CellState.Owned : revealedState(0)));
@@ -159,7 +159,7 @@ describe('bases', () => {
     expect(b.route(cellKey(1, 0))).toBe(0);
     expect(econ.baseMult).toBeCloseTo(1 + cfg.econ.multPerBase);
     const c0 = econ.credits;
-    b.turn();
+    b.tick(10);
     expect(econ.credits).toBe(c0);
     expect(econ.unbanked).toBe(0);
     expect(b.shipments.length).toBe(0);
@@ -182,7 +182,13 @@ describe('bases', () => {
     expect(g.econ.baseMult).toBeGreaterThan(1);
     const credits = g.econ.credits;
     let start = g.econ.unbanked;
-    for (let i = 0; i < 50; i++) g.tick(0.1);
+    let shipped = 0;
+    for (let i = 0; i < 50; i++) {
+      g.tick(0.1);
+      shipped = Math.max(shipped, b.shipments.length);
+    }
+    // Linked complexes away from the main one keep sending (cosmetic) shipments on their own clocks.
+    if ([...b.complexes.values()].some((c) => c.hub !== b.main && c.weight > 0)) expect(shipped).toBeGreaterThan(0);
     // Time alone produces nothing; shipments are only a picture.
     expect(g.econ.unbanked).toBe(start);
     const pick = (ok: (x: number, y: number) => boolean): [number, number] => {
@@ -219,8 +225,6 @@ describe('bases', () => {
     expect(g.econ.unbanked - start).toBeCloseTo(r.revealed * g.cfg.econ.tilePoints * g.econ.pointMult(), 6);
     // Nothing lands in credits until Cash Out.
     expect(g.econ.credits).toBe(credits);
-    // Linked complexes away from the main one send a (cosmetic) shipment.
-    if ([...b.complexes.values()].some((c) => c.hub !== b.main && c.weight > 0)) expect(b.shipments.length).toBeGreaterThan(0);
   });
 
   it('a settlement pays basePoints per new base; the pool never holds more than its capacity', () => {
@@ -306,11 +310,12 @@ describe('blasts', () => {
   it('radius range follows the mining tier (the last entry covers higher tiers)', () => {
     const cfg = makeConfig({} as never).blast;
     const ranges = [1, 3, 5, 6].map((t) => blastRange(cfg, t)).map((r) => [r.min, r.max]);
-    expect(ranges).toEqual([[3, 5], [4, 6], [5, 7], [5, 7]]);
+    expect(ranges).toEqual([cfg.radiusByTier[0], cfg.radiusByTier[2], cfg.radiusByTier[4], cfg.radiusByTier[4]]);
+    const [lo, hi] = cfg.radiusByTier[2];
     for (let n = 0; n < 50; n++) {
       const r = blastRadius(cfg, 3, 7, n, -n, n);
-      expect(r).toBeGreaterThanOrEqual(4);
-      expect(r).toBeLessThanOrEqual(6);
+      expect(r).toBeGreaterThanOrEqual(lo);
+      expect(r).toBeLessThanOrEqual(hi);
     }
   });
 
@@ -369,5 +374,42 @@ describe('blasts', () => {
     // Disabled bases survive a save.
     const back = Game.fromSave(structuredClone(g.toSave()));
     for (const d of bl.disabled.slice(1)) expect(back.bases.isBase(d)).toBe(false);
+  });
+  it('a blast lifts every flag inside; a flag on a mine goes off in a chain (Exploded) and only the first mine burns funds', () => {
+    const g = game(5);
+    const bd = g.board;
+    // An Unknown mine with another Unknown mine and an Unknown safe cell within 2 tiles.
+    let found: { a: [number, number]; b: [number, number]; c: [number, number] } | null = null;
+    for (let ny = bd.minY; ny <= bd.maxY && !found; ny++) {
+      for (let nx = bd.minX; nx <= bd.maxX && !found; nx++) {
+        if (g.cellState(nx, ny) !== CellState.Unknown || g.world.truth(nx, ny) !== 1) continue;
+        let b: [number, number] | null = null;
+        let c: [number, number] | null = null;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            if ((!dx && !dy) || dx * dx + dy * dy > 4 || g.cellState(nx + dx, ny + dy) !== CellState.Unknown) continue;
+            if (g.world.truth(nx + dx, ny + dy) === 1) b ??= [nx + dx, ny + dy];
+            else c ??= [nx + dx, ny + dy];
+          }
+        }
+        if (b && c) found = { a: [nx, ny], b, c };
+      }
+    }
+    expect(found).not.toBeNull();
+    const { a, b, c } = found!;
+    g.setFlag(b[0], b[1], true);
+    g.setFlag(c[0], c[1], true);
+    const hits = g.econ.lifetime.hits;
+    let blast: { chain: Array<{ x: number; y: number; r: number }>; cleared: number } | null = null;
+    g.events.on('hit', (h) => (blast = h.blast));
+    expect(g.reveal(a[0], a[1]).hit).toBe(true);
+    expect(g.econ.lifetime.hits).toBe(hits + 1);
+    expect(g.cellState(b[0], b[1])).toBe(CellState.Exploded);
+    expect(g.cellState(c[0], c[1])).toBe(CellState.Unknown);
+    const bl = blast as unknown as { chain: Array<{ x: number; y: number }>; cleared: number };
+    expect(bl.chain.some((e) => e.x === b[0] && e.y === b[1])).toBe(true);
+    expect(bl.cleared).toBeGreaterThanOrEqual(1);
+    expect(g.world.committed(cellKey(b[0], b[1]))).toBe(1);
+    expect(g.world.committed(cellKey(c[0], c[1]))).toBe(0);
   });
 });

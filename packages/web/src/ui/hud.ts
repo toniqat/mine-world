@@ -8,7 +8,7 @@ export type PanelName = 'base' | 'settings';
 export interface HudHandlers {
   cashOut(): void;
   toggleSettings(): void;
-  home(): void;
+  toggleMainBase(): void;
   toggleFlagMode(): void;
 }
 
@@ -49,11 +49,12 @@ class Counter {
 }
 
 /**
- * Three floating capsules instead of a bar: credits (top left), the unbanked
- * pool with its cap, the combo and Cash Out (top centre), and the buttons
- * (top right: flag mode in toggle input, home, settings). Credits and the pool
- * count towards their real values; what the pool gains or loses floats up
- * from it.
+ * Three floating capsules instead of a bar: the unbanked pool with its cap,
+ * the combo and Cash Out (top centre), and at the top right the credits next
+ * to the buttons (flag mode in toggle input, main base, settings). Credits and
+ * the pool count towards their real values; what the pool gains or loses in
+ * one go floats out of it as one sum, and a broken combo floats out of the
+ * combo.
  */
 export class Hud {
   private credits = new Counter();
@@ -69,6 +70,11 @@ export class Hud {
   private cashout!: HTMLButtonElement;
   private flagBtn!: HTMLButtonElement;
   private settingsBtn!: HTMLButtonElement;
+  private baseBtn!: HTMLButtonElement;
+  private comboStat!: HTMLElement;
+  private lastStreak = 0;
+  /** A Cash Out resets the combo too; that is no break. */
+  private cashing = false;
   private game: Game | null = null;
   private lastUnbanked = 0;
   /** Pool drop that a Cash Out explains (not floated as a loss). */
@@ -95,21 +101,22 @@ export class Hud {
     this.comboEl = el('div', { class: 'value small' }, '0');
     this.multEl = el('div', { class: 'sub' }, '×1.00');
     this.cashout = el('button', { class: 'btn primary cashout', onclick: () => this.h.cashOut() }, t('hud.cashout'));
+    this.comboStat = el('div', { class: 'stat combo' }, el('div', { class: 'label', text: t('hud.streak') }), el('div', { class: 'amount' }, this.comboEl, this.multEl));
     this.poolPill = el(
       'div',
       { class: 'pill pool' },
       el('div', { class: 'stat' }, el('div', { class: 'label', text: t('hud.unbanked') }), el('div', { class: 'amount' }, this.poolEl, this.capEl), el('div', { class: 'bar' }, this.fillEl)),
-      el('div', { class: 'stat combo' }, el('div', { class: 'label', text: t('hud.streak') }), el('div', { class: 'amount' }, this.comboEl, this.multEl)),
+      this.comboStat,
       this.cashout,
     );
 
     const iconBtn = (icon: Parameters<typeof svgIcon>[0], title: string, onclick: () => void) => el('button', { class: 'btn icon', title, html: svgIcon(icon), onclick });
     this.flagBtn = iconBtn('flag', `${t('hud.flagMode')} (F)`, () => this.h.toggleFlagMode());
     this.settingsBtn = iconBtn('settings', t('hud.settings'), () => this.h.toggleSettings());
+    this.baseBtn = iconBtn('base', `${t('hud.mainBase')} (U)`, () => this.h.toggleMainBase());
     this.hud.append(
-      this.creditsPill,
       this.poolPill,
-      el('div', { class: 'pill menu' }, this.flagBtn, iconBtn('home', `${t('hud.home')} (H)`, () => this.h.home()), this.settingsBtn),
+      el('div', { class: 'hud-right' }, this.creditsPill, el('div', { class: 'pill menu' }, this.flagBtn, this.baseBtn, this.settingsBtn)),
     );
     if (this.game) this.paint();
   }
@@ -120,6 +127,8 @@ export class Hud {
     this.credits.snap(game.econ.credits);
     this.pool.snap(game.econ.unbanked);
     this.lastUnbanked = game.econ.unbanked;
+    this.lastStreak = game.econ.streak;
+    this.cashing = false;
     this.banking = 0;
     this.pending = 0;
     this.paint();
@@ -128,6 +137,7 @@ export class Hud {
   /** A Cash Out moved `amount` from the pool into credits: both counters run, the pool's drop is no loss. */
   cashedOut(amount: number): void {
     this.banking += amount;
+    this.cashing = true;
     this.creditsPill.classList.remove('gaining');
     void this.creditsPill.offsetWidth;
     this.creditsPill.classList.add('gaining');
@@ -162,6 +172,11 @@ export class Hud {
     }
     if (this.pending !== 0 && now - this.pendingSince >= FLOAT_MS) this.flushFloat();
 
+    // A combo broken by a mine or a wrong flag (not by a Cash Out) floats out of the combo.
+    if (e.streak < this.lastStreak && !this.cashing) this.float(this.comboStat, `−${this.lastStreak - e.streak}`, true);
+    this.lastStreak = e.streak;
+    this.cashing = false;
+
     this.credits.target = e.credits;
     this.pool.target = e.unbanked;
     this.credits.step(dt);
@@ -191,13 +206,19 @@ export class Hud {
     const v = this.pending;
     this.pending = 0;
     if (Math.abs(v) < 0.5) return;
-    const node = el('span', { class: 'gain' + (v < 0 ? ' loss' : ''), text: `${v > 0 ? '+' : '−'}${fmt(Math.abs(v))}` });
-    this.poolPill.append(node);
+    this.float(this.poolPill, `${v > 0 ? '+' : '−'}${fmt(Math.abs(v))}`, v < 0);
+  }
+
+  private float(parent: HTMLElement, text: string, loss: boolean): void {
+    const node = el('span', { class: 'gain' + (loss ? ' loss' : ''), text });
+    parent.append(node);
     setTimeout(() => node.remove(), 1000);
   }
 
-  setActive(name: 'settings' | null): void {
+  /** The open popover's button shows a blue circle. */
+  setActive(name: PanelName | null): void {
     this.settingsBtn.classList.toggle('active', name === 'settings');
+    this.baseBtn.classList.toggle('active', name === 'base');
   }
 
   setFlagMode(on: boolean, visible: boolean): void {

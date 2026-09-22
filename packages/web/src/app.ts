@@ -17,7 +17,7 @@ import { Toasts, confirmDialog } from './ui/toast';
 /** The demo board behind the title fades out over this long once Start is pressed. */
 const DEMO_FADE_MS = 500;
 /** Zoom of the title-screen demo (a wider view than play, so the camera barely moves). */
-const DEMO_ZOOM = 0.94;
+const DEMO_ZOOM = 0.75;
 /** A finished demo world fades to black over this long (seconds), stays black, then the next one fades in. */
 const DEMO_SWAP_FADE = 0.9;
 const DEMO_SWAP_HOLD = 0.5;
@@ -37,6 +37,8 @@ export class App {
   /** Drone being dragged to another Owned mine (drones exist only with equipment). */
   private drag: { id: number } | null = null;
   private dirty = false;
+  /** Cell the current opening started from; fog it lifts spreads from there. */
+  private fogFrom: number | null = null;
   private lastSave = 0;
   private saving = false;
   private panelTimer = 0;
@@ -79,7 +81,7 @@ export class App {
     this.hud = new Hud(document.getElementById('hud')!, {
       cashOut: () => this.cashOut(),
       toggleSettings: () => this.togglePanel('settings'),
-      home: () => this.goHome(),
+      toggleMainBase: () => this.toggleMain(),
       toggleFlagMode: () => this.setFlagMode(!this.flagMode),
     });
     this.panels = new Panels(document.getElementById('panel')!, {
@@ -251,17 +253,21 @@ export class App {
       on('settlement', (ev) => {
         const pal = PALETTES[resolveTheme(this.settings.theme)];
         this.view.pulse(ev.cells, ev.x, ev.y, ev.wrong === 0 ? pal.success : pal.error);
+        // Each new base shows the points it earned rising from its tile.
+        if (ev.wrong === 0 && ev.correct > 0) {
+          const each = `+${fmt(ev.payout / ev.correct)}`;
+          for (const k of ev.cells) this.view.floatText(keyX(k), keyY(k), each, pal.accent);
+        }
       }),
       on('hit', (h) => {
         if (demo) {
           const pal = PALETTES[resolveTheme(this.settings.theme)];
-          return this.view.blast(h.x, h.y, h.blast.r, pal.error, pal.warning);
+          return this.view.explosion(h.x, h.y, h.blast.r, h.blast.chain, pal.error, pal.warning);
         }
+        // No toast: the pool and the combo in the HUD show what the hit cost.
         if (h.actor.kind === 'drone') this.toasts.show(t('toast.droneHit', { id: h.actor.id }), 'bad', 5000);
-        else this.toasts.show(t('toast.hit', { loss: fmt(h.loss) }), 'bad');
-        if (h.blast.disabled.length) this.toasts.show(t('toast.blast', { r: h.blast.r.toFixed(1), n: h.blast.disabled.length }), 'bad', 5000);
         const pal = PALETTES[resolveTheme(this.settings.theme)];
-        this.view.blast(h.x, h.y, h.blast.r, pal.error, pal.warning);
+        this.view.explosion(h.x, h.y, h.blast.r, h.blast.chain, pal.error, pal.warning);
         if (navigator.vibrate) navigator.vibrate([30, 40, 30]);
       }),
       on('grand', (f) => {
@@ -270,7 +276,7 @@ export class App {
         if (!demo) this.toasts.show(t('toast.grand', { n: f.members.length, m: mult }), 'good', 4000);
       }),
       on('fog', (keys) => {
-        this.view.liftFog(keys);
+        this.view.liftFog(keys, this.fogFrom ?? this.view.rippleFrom ?? undefined);
         this.dirty = true;
       }),
       on('tech', (tier) => {
@@ -314,7 +320,13 @@ export class App {
       this.game.cycleMark(c.x, c.y);
       return;
     }
-    if (s === CellState.Unknown && this.game.reveal(c.x, c.y).full) this.poolFull();
+    // Fog this opening lifts spreads from the clicked cell (the first click: from the new main base).
+    this.fogFrom = cellKey(c.x, c.y);
+    try {
+      if (s === CellState.Unknown && this.game.reveal(c.x, c.y).full) this.poolFull();
+    } finally {
+      this.fogFrom = null;
+    }
   }
 
   /** Something tried to open a tile while the unbanked pool is full: say Cash Out comes first. */
@@ -519,7 +531,7 @@ export class App {
   }
 
   private syncHudActive(): void {
-    this.hud.setActive(this.panels.current === 'settings' ? 'settings' : null);
+    this.hud.setActive(this.panels.current);
   }
 
   private refreshPanel(): void {

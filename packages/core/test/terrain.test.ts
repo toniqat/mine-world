@@ -147,7 +147,7 @@ describe('terrain walls', () => {
     }
   });
 
-  it('bases treat walls as resolved neighbours, but network edges cannot cross them', () => {
+  it('bases treat walls as resolved neighbours and network edges cross them like opened cells', () => {
     const cfg = makeConfig({} as never);
     const econ = new Econ(cfg.econ, cfg.world.densityMin);
     // Row y = 0 is open from x = 0 to 6 except a mountain at x = 3; everything else in rows -1..1 is a mountain.
@@ -159,9 +159,10 @@ describe('terrain walls', () => {
     const b = new Bases(cfg.bases, econ, state);
     econ.owned.set(cellKey(5, 0), { income: 1, dm: 1, produced: 0 });
     b.recompute(cellKey(1, 0));
-    expect(b.passable(3, 0)).toBe(false);
+    expect(b.passable(3, 0)).toBe(true);
     expect(b.settled(cellKey(5, 0))).toBe(true);
-    expect(b.isolated.has(cellKey(5, 0))).toBe(true);
+    expect(b.isolated.has(cellKey(5, 0))).toBe(false);
+    expect(b.complexes.get(cellKey(5, 0))?.path).toContain(cellKey(3, 0));
   });
 
   it('survives a save round-trip; saves from before terrain stay wall-free', () => {

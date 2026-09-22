@@ -1,4 +1,4 @@
-import { CellState, isRevealed, isWall, numberOf } from '../board';
+import { CellState, isRevealed, numberOf } from '../board';
 import type { BaseConfig } from '../config';
 import { hash01 } from '../hash';
 import { cellKey, keyX, keyY } from '../key';
@@ -30,7 +30,7 @@ import type { Econ } from './income';
  * Network: a tree of complexes rooted at the main complex, with no range
  * limit. Edges are tile paths (4-neighbourhood) that never cross an Unknown
  * or flagged cell; every other cell stays passable for good (opened cells,
- * bases, lost and exploded mines), so a path never breaks. A complex's
+ * terrain walls, bases, lost and exploded mines), so a path never breaks. A complex's
  * parent is the complex it reaches over the shortest such path among those
  * whose hub is strictly closer (Manhattan) to the main base; ties go to the
  * parent whose hub is closer to the main base, then the smaller entry key.
@@ -41,11 +41,12 @@ import type { Econ } from './income';
  * in by Unknown cells) is isolated. It does not count towards the
  * multiplier and is not linked. Opening a way out lifts isolation.
  *
- * Shipments are only a picture of the link: every player action that changes
- * tiles (`Game` calls `turn()`) each linked complex sends one down its edge,
- * travelling edge by edge at `speed()` tiles per second (one arriving at an
- * intermediate complex continues at once, joining its outgoing shipment if it
- * has barely left). They carry nothing.
+ * Shipments are only a picture of the link: every linked complex keeps
+ * sending one down its edge every `shipIntervalSec` on its own clock (the
+ * phase comes from its hub, so complexes do not tick together), travelling
+ * edge by edge at `speed()` tiles per second (one arriving at an intermediate
+ * complex continues at once, joining its outgoing shipment if it has barely
+ * left). They carry nothing.
  *
  * Only the main base is levelled. Its level raises the pool's capacity.
  */
@@ -160,6 +161,8 @@ export class Bases {
   formed: GrandFormed[] = [];
   /** Hub -> its latest outgoing shipment, which arrivals may join. */
   private lastOut = new Map<number, Shipment>();
+  /** Hub -> seconds until its complex sends the next shipment. */
+  private clock = new Map<number, number>();
   private routes = new Map<number, number>();
   /** Members of grand complexes after the last rebuild, to spot new ones. */
   private grandKeys = new Set<number>();
@@ -204,10 +207,10 @@ export class Bases {
     return this.mainLevel >= this.cfg.maxLevel;
   }
 
-  /** Can a network edge cross this cell? Everything but Unknown, flagged and terrain (wall) cells. */
+  /** Can a network edge cross this cell? Everything but Unknown and flagged cells (terrain walls count as opened). */
   passable(x: number, y: number): boolean {
     const s = this.state(x, y);
-    return s !== CellState.Unknown && s !== CellState.Flag && !isWall(s);
+    return s !== CellState.Unknown && s !== CellState.Flag;
   }
 
   /** No Unknown or flag among the 8 neighbours (walls count as resolved), and every number among them has faded out (none next to it either). */
@@ -249,6 +252,7 @@ export class Bases {
     }
     this.buildComplexes();
     if (main !== null) this.link(main);
+    for (const hub of this.clock.keys()) if (!this.complexes.has(hub)) this.clock.delete(hub);
 
     let total = 0;
     for (const c of this.complexes.values()) {
@@ -420,18 +424,20 @@ export class Bases {
     return out;
   }
 
-  /**
-   * One turn passed (a tile-changing player action): each linked complex
-   * sends a shipment towards the main base, for the picture only. Uses the
-   * network of the last `recompute`.
-   */
-  turn(): void {
-    const main = this.main;
-    for (const c of this.complexes.values()) if (c.hub !== main && c.weight > 0) this.ship(c.hub);
-  }
-
   /** Move the shipments (animation only). */
   tick(dt: number): void {
+    // Every linked complex sends one on its own clock.
+    const every = this.cfg.shipIntervalSec;
+    const main = this.main;
+    for (const c of this.complexes.values()) {
+      if (c.hub === main || c.weight <= 0 || c.parent === null) continue;
+      let left = (this.clock.get(c.hub) ?? hash01(0x5f1a, keyX(c.hub), keyY(c.hub)) * every) - dt;
+      if (left <= 0) {
+        this.ship(c.hub);
+        left = Math.max(left + every, 0);
+      }
+      this.clock.set(c.hub, left);
+    }
     const step = this.speed() * dt;
     const list = this.shipments;
     let n = 0;

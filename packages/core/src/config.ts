@@ -120,6 +120,8 @@ export interface DroneConfig {
 export interface BaseConfig {
   /** Speed of the (cosmetic) shipment animation along the base network, tiles per second. */
   transportTilesPerSec: number;
+  /** Every linked complex sends a (cosmetic) shipment this often, each on its own clock. */
+  shipIntervalSec: number;
   mainCostBase: number;
   mainCostGrowth: number;
   maxLevel: number;
@@ -244,7 +246,8 @@ export const DEFAULT_CONFIG: GameConfig = {
     moveSpeedPerLevel: 1,
   },
   bases: {
-    transportTilesPerSec: 4, // animation only: credits arrive every turn
+    transportTilesPerSec: 4, // animation only
+    shipIntervalSec: 2, // animation only
     mainCostBase: 150, // TODO(play)
     mainCostGrowth: 1.6, // TODO(play)
     maxLevel: 50,
@@ -252,7 +255,7 @@ export const DEFAULT_CONFIG: GameConfig = {
     grandBonusPerBase: 0.05, // user decision: 5 bases x1.25, 10 bases x1.5
   },
   blast: {
-    radiusByTier: [[3, 5], [3.5, 5.5], [4, 6], [4.5, 6.5], [5, 7]], // user decision: higher tiers blast wider; TODO(play) values
+    radiusByTier: [[2.1, 3.5], [2.45, 3.85], [2.8, 4.2], [3.15, 4.55], [3.5, 4.9]], // user decision: higher tiers blast wider; cut ~30 % (2026-09-22); TODO(play) values
     repairCostBase: 20, // TODO(play)
     repairCostPerTile: 0.2, // TODO(play)
   },

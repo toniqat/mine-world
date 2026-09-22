@@ -30,6 +30,8 @@ export interface CellTextures {
   /** A tile in a mining tier whose technology is not learned yet: its own colour and a padlock. */
   locked: Texture;
   digits: Texture[]; // index 1..8
+  /** Digits in the error colour: more flags and known mines around the number than it says. */
+  digitsOver: Texture[]; // index 1..8
   empty: Texture;
 }
 
@@ -129,26 +131,30 @@ export function buildTextures(renderer: Renderer, p: Palette): CellTextures {
   const question = questionTile(p.cellUnknown);
   const questionHover = questionTile(p.cellUnknownHover);
   const empty = gen(renderer, () => {});
-  const digits: Texture[] = [empty];
-  for (let n = 1; n <= 8; n++) {
-    const text = new Text({
-      text: String(n),
-      style: {
-        fontFamily: 'Cascadia Code, SF Mono, Consolas, Roboto Mono, monospace',
-        fontSize: 17,
-        fontWeight: '700',
-        fill: hex(p.digit),
-      },
-    });
-    text.anchor.set(0.5);
-    text.position.set(c, c + 1);
-    const holder = new Container();
-    holder.addChild(text);
-    const tex = renderer.generateTexture({ target: holder, resolution: RES, frame: new Rectangle(0, 0, CELL, CELL) });
-    holder.destroy({ children: true });
-    digits.push(tex);
-  }
-  return { unknown, unknownHover, question, questionHover, revealed, flag, flagGlyph, owned, ownedIsolated, ownedDisabled, lost, exploded, mountain, water, fog, locked, digits, empty };
+  const digitSet = (fill: number): Texture[] => {
+    const out: Texture[] = [empty];
+    for (let n = 1; n <= 8; n++) {
+      const text = new Text({
+        text: String(n),
+        style: {
+          fontFamily: 'Cascadia Code, SF Mono, Consolas, Roboto Mono, monospace',
+          fontSize: 17,
+          fontWeight: '700',
+          fill: hex(fill),
+        },
+      });
+      text.anchor.set(0.5);
+      text.position.set(c, c + 1);
+      const holder = new Container();
+      holder.addChild(text);
+      out.push(renderer.generateTexture({ target: holder, resolution: RES, frame: new Rectangle(0, 0, CELL, CELL) }));
+      holder.destroy({ children: true });
+    }
+    return out;
+  };
+  const digits = digitSet(p.digit);
+  const digitsOver = digitSet(p.error);
+  return { unknown, unknownHover, question, questionHover, revealed, flag, flagGlyph, owned, ownedIsolated, ownedDisabled, lost, exploded, mountain, water, fog, locked, digits, digitsOver, empty };
 }
 
 /** Outline of a rect as dashes (call `stroke` afterwards). */
@@ -167,7 +173,7 @@ function dashedRect(g: Graphics, x: number, y: number, w: number, h: number, das
 
 export function destroyTextures(t: CellTextures): void {
   // digits[0] is `empty`; destroy it once.
-  for (const tex of [t.unknown, t.unknownHover, t.question, t.questionHover, t.revealed, t.flag, t.flagGlyph, t.owned, t.ownedIsolated, t.ownedDisabled, t.lost, t.exploded, t.mountain, t.water, t.fog, t.locked, t.empty, ...t.digits.slice(1)]) tex.destroy(true);
+  for (const tex of [t.unknown, t.unknownHover, t.question, t.questionHover, t.revealed, t.flag, t.flagGlyph, t.owned, t.ownedIsolated, t.ownedDisabled, t.lost, t.exploded, t.mountain, t.water, t.fog, t.locked, t.empty, ...t.digits.slice(1), ...t.digitsOver.slice(1)]) tex.destroy(true);
 }
 
 /** Background texture for a cell state. */
