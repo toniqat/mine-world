@@ -10,6 +10,7 @@ import { join } from 'node:path';
  * Dev-only flags (used by automated visual checks):
  *   --exec=<file.js>        run the script in the page after load
  *   --screenshot=<file.png> capture the window ~2.5 s after load, then quit
+ *   --size=<w>x<h>          window content size (e.g. 390x844 for a phone layout; lifts the minimum size)
  */
 const here = __dirname;
 
@@ -19,11 +20,13 @@ function arg(name: string): string | undefined {
 }
 
 function createWindow(): void {
+  const size = /^(\d+)x(\d+)$/.exec(arg('size') ?? '');
   const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 720,
-    minHeight: 480,
+    width: size ? Number(size[1]) : 1280,
+    height: size ? Number(size[2]) : 820,
+    useContentSize: size !== null,
+    minWidth: size ? 0 : 720,
+    minHeight: size ? 0 : 480,
     autoHideMenuBar: true,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#1f1f1f' : '#ffffff',
     title: 'Mine World',

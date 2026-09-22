@@ -1,3 +1,4 @@
+import { isTouchDevice } from '../device';
 import { t } from '../i18n';
 import { el } from './dom';
 
@@ -95,7 +96,7 @@ export class StartHint {
   private node: HTMLElement;
 
   constructor(host: HTMLElement) {
-    this.node = el('div', { class: 'start-hint', text: t('title.hint') });
+    this.node = el('div', { class: 'start-hint', text: t(isTouchDevice() ? 'title.hint.touch' : 'title.hint') });
     host.append(this.node);
     requestAnimationFrame(() => this.node.classList.add('show'));
   }

@@ -1,6 +1,7 @@
 import { Application } from 'pixi.js';
 import { CellState, Game, cellKey, isRevealed, keyX, keyY, type SaveData } from '@mine/core';
 import { DemoPlayer } from './demo';
+import { isTouchDevice, onTouchDeviceChange } from './device';
 import { fmt } from './format';
 import { resolveLang, setLang, t, upgradeName } from './i18n';
 import { InputController } from './input';
@@ -121,6 +122,8 @@ export class App {
       grabEnd: (c) => this.onGrabEnd(c),
     });
     this.applySettings(this.settings, false);
+    // A convertible switching between touch and mouse swaps the rules live.
+    onTouchDeviceChange(() => this.applySettings(this.settings));
     this.bindGame(this.demo.game, true);
     this.cam.resize(this.app.screen.width, this.app.screen.height);
     this.cam.zoom = DEMO_ZOOM;
@@ -363,7 +366,11 @@ export class App {
     const s = this.game.cellState(c.x, c.y);
     if (isRevealed(s)) return this.chordAt(c);
     if (this.lockedToast(c)) return;
-    if (this.settings.inputMode === 'toggle' && this.flagMode) {
+    // Touch devices never open a tile by tapping it (tiles open through chords;
+    // only the first tap, placing the main base, opens): a tap cycles the mark
+    // like a right-click.
+    const mark = isTouchDevice() ? this.game.world.started : this.settings.inputMode === 'toggle' && this.flagMode;
+    if (mark) {
       this.game.cycleMark(c.x, c.y);
       return;
     }
@@ -461,7 +468,7 @@ export class App {
         this.togglePanel(null);
         break;
       case 'KeyF':
-        this.setFlagMode(!this.flagMode);
+        if (!isTouchDevice()) this.setFlagMode(!this.flagMode);
         break;
       case 'KeyH':
         this.goHome();
@@ -486,7 +493,12 @@ export class App {
 
   private setFlagMode(on: boolean): void {
     this.flagMode = on;
-    this.hud.setFlagMode(on, this.settings.inputMode === 'toggle');
+    this.hud.setFlagMode(on, this.flagModeShown());
+  }
+
+  /** The flag-mode button only exists in toggle input, and not on touch devices (a tap already marks). */
+  private flagModeShown(): boolean {
+    return this.settings.inputMode === 'toggle' && !isTouchDevice();
   }
 
   // ---------------------------------------------------------------- actions
@@ -603,10 +615,15 @@ export class App {
       this.view.setDensityOverlay(s.showDensity);
     }
     setLang(resolveLang(s.lang));
-    if (this.input) this.input.longPressMs = s.longPressMs;
+    const touch = isTouchDevice();
+    document.documentElement.classList.toggle('touch', touch);
+    if (this.input) {
+      this.input.longPressMs = s.longPressMs;
+      this.input.longPress = !touch;
+    }
     if (this.hud) {
       this.hud.build();
-      this.hud.setFlagMode(this.flagMode, s.inputMode === 'toggle');
+      this.hud.setFlagMode(this.flagMode, this.flagModeShown());
       this.syncHudActive();
     }
     if (rerender) this.refreshPanel();

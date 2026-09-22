@@ -28,9 +28,13 @@ interface PointerRec {
 }
 
 const DRAG_THRESHOLD = 6;
+/** Fingers wobble more than a mouse: a tap may drift this far and still be a tap. */
+const TOUCH_DRAG_THRESHOLD = 10;
 
 export class InputController {
   longPressMs = 450;
+  /** Long press as a secondary action (off on touch devices, where a tap already marks). */
+  longPress = true;
   /** Off while the title screen or the intro is up: pointer, wheel and keys are ignored. */
   enabled = true;
   private pointers = new Map<number, PointerRec>();
@@ -39,6 +43,8 @@ export class InputController {
   private longPressTimer: number | null = null;
   private longPressed = false;
   private pinchDist = 0;
+  /** Screen midpoint of the two pinching pointers. */
+  private pinchMid = { x: 0, y: 0 };
   private lastPanTs = 0;
   private velocity = { x: 0, y: 0 };
   private lastMove = { x: 0, y: 0, t: 0 };
@@ -99,7 +105,7 @@ export class InputController {
         this.grabbing = true;
         return;
       }
-      if (e.button === 0) {
+      if (e.button === 0 && this.longPress) {
         this.longPressTimer = window.setTimeout(() => {
           this.longPressTimer = null;
           if (this.dragging || this.pointers.size !== 1) return;
@@ -112,8 +118,8 @@ export class InputController {
       this.clearLongPress();
       this.endGrab(null);
       this.dragging = true;
-      const [a, b] = [...this.pointers.values()];
-      this.pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      this.h.hover(null);
+      this.startPinch();
     }
   };
 
@@ -132,19 +138,20 @@ export class InputController {
       this.h.grabMove?.(this.cam.screenToWorld(rec.x - r.left, rec.y - r.top), this.cellAt(rec.x, rec.y));
       return;
     }
-    if (this.pointers.size === 2) {
+    if (this.pointers.size >= 2) {
+      // Zoom about the previous midpoint, then follow the midpoint: the world
+      // point between the fingers stays between them.
       const [a, b] = [...this.pointers.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y);
-      const mx = (a.x + b.x) / 2;
-      const my = (a.y + b.y) / 2;
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
       const r = this.canvas.getBoundingClientRect();
-      if (this.pinchDist > 0) this.cam.zoomAt(mx - r.left, my - r.top, dist / this.pinchDist);
+      if (this.pinchDist > 0 && dist > 0) this.cam.zoomAt(this.pinchMid.x - r.left, this.pinchMid.y - r.top, dist / this.pinchDist);
+      this.cam.panBy(mid.x - this.pinchMid.x, mid.y - this.pinchMid.y);
       this.pinchDist = dist;
-      // Pan by the midpoint movement of this pointer only (approximation).
-      this.cam.panBy((rec.x - px) / 2, (rec.y - py) / 2);
+      this.pinchMid = mid;
       return;
     }
-    if (!this.dragging && Math.hypot(rec.x - rec.startX, rec.y - rec.startY) > DRAG_THRESHOLD) {
+    if (!this.dragging && Math.hypot(rec.x - rec.startX, rec.y - rec.startY) > (rec.isTouch ? TOUCH_DRAG_THRESHOLD : DRAG_THRESHOLD)) {
       this.dragging = true;
       this.clearLongPress();
     }
@@ -157,7 +164,7 @@ export class InputController {
       this.velocity = { x: dx / dt, y: dy / dt };
       this.lastMove = { x: rec.x, y: rec.y, t: now };
       this.h.hover(null);
-    } else {
+    } else if (!rec.isTouch) {
       this.h.hover(this.cellAt(rec.x, rec.y));
     }
   };
@@ -171,7 +178,18 @@ export class InputController {
       this.endGrab(e.type === 'pointercancel' ? null : this.cellAt(rec.x, rec.y));
       return;
     }
-    if (this.pointers.size > 0) return;
+    if (this.pointers.size === 2) {
+      // A third finger left: pinch on with the two that stay.
+      this.startPinch();
+      return;
+    }
+    if (this.pointers.size > 0) {
+      // Pinch over, one finger left: it pans from where it is, without inertia from the pinch.
+      this.velocity = { x: 0, y: 0 };
+      this.lastMove.t = 0;
+      return;
+    }
+    if (rec.isTouch) this.h.hover(null);
     const wasDragging = this.dragging;
     this.dragging = false;
     if (wasDragging) {
@@ -198,6 +216,12 @@ export class InputController {
     this.keys.add(e.code);
     this.h.key(e.code, e);
   };
+
+  private startPinch(): void {
+    const [a, b] = [...this.pointers.values()];
+    this.pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+    this.pinchMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
 
   private endGrab(cell: { x: number; y: number } | null): void {
     if (!this.grabbing) return;

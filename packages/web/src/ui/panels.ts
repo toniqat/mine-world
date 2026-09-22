@@ -1,6 +1,7 @@
 import { UPGRADES, type BaseInfo, type Game } from '@mine/core';
 import { fmt } from '../format';
 import { getLang, t, upgradeDesc, upgradeName, type StringKey } from '../i18n';
+import { isTouchDevice } from '../device';
 import type { Settings } from '../storage';
 import { clear, el } from './dom';
 import type { PanelName } from './hud';
@@ -139,6 +140,8 @@ export class Panels {
     const check = (value: boolean, onchange: (v: boolean) => void) =>
       el('input', { type: 'checkbox', checked: value, onchange: (e) => onchange((e.target as HTMLInputElement).checked) });
     const emit = () => this.h.settingsChanged(s);
+    // Touch devices have one input: a tap marks (no input mode, no long press).
+    const touch = isTouchDevice();
     this.body.append(
       field(
         t('settings.theme'),
@@ -154,14 +157,14 @@ export class Panels {
           emit();
         }),
       ),
-      field(
+      touch ? '' : field(
         t('settings.input'),
         select(s.inputMode, [['classic', t('settings.input.classic')], ['toggle', t('settings.input.toggle')]], (v) => {
           s.inputMode = v as Settings['inputMode'];
           emit();
         }),
       ),
-      field(
+      touch ? '' : field(
         t('settings.longPress'),
         el('input', {
           type: 'number',
@@ -199,7 +202,7 @@ export class Panels {
         el('span', {}, `${t('status.seed')} ${game.cfg.seed}`),
         el('div', {}, el('button', { class: 'btn small', text: t('settings.save'), onclick: () => this.h.saveNow() }), ' ', el('button', { class: 'btn small danger', text: t('settings.newGame'), onclick: () => this.h.newGame() })),
       ),
-      el('div', { class: 'help', text: t('settings.help') }),
+      el('div', { class: 'help', text: t(touch ? 'settings.help.touch' : 'settings.help') }),
       el('div', { class: 'help', text: `v0.1 · ${getLang()}` }),
     );
   }

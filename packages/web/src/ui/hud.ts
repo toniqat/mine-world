@@ -49,8 +49,8 @@ class Counter {
 }
 
 /**
- * Three floating capsules instead of a bar: the unbanked pool with its cap,
- * the combo and Cash Out (top centre), and at the top right the credits next
+ * Floating capsules instead of a bar: the unbanked pool with its cap and Cash
+ * Out, the combo next to it (top centre), and at the top right the credits next
  * to the buttons (flag mode in toggle input, main base, settings). Credits and
  * the pool count towards their real values; what the pool gains or loses in
  * one go floats out of it as one sum, and a broken combo floats out of the
@@ -101,12 +101,11 @@ export class Hud {
     this.comboEl = el('div', { class: 'value small' }, '0');
     this.multEl = el('div', { class: 'sub' }, '×1.00');
     this.cashout = el('button', { class: 'btn primary cashout', onclick: () => this.h.cashOut() }, t('hud.cashout'));
-    this.comboStat = el('div', { class: 'stat combo' }, el('div', { class: 'label', text: t('hud.streak') }), el('div', { class: 'amount' }, this.comboEl, this.multEl));
+    this.comboStat = el('div', { class: 'pill combo' }, el('div', { class: 'stat' }, el('div', { class: 'label', text: t('hud.streak') }), el('div', { class: 'amount' }, this.comboEl, this.multEl)));
     this.poolPill = el(
       'div',
       { class: 'pill pool' },
       el('div', { class: 'stat' }, el('div', { class: 'label', text: t('hud.unbanked') }), el('div', { class: 'amount' }, this.poolEl, this.capEl), el('div', { class: 'bar' }, this.fillEl)),
-      this.comboStat,
       this.cashout,
     );
 
@@ -115,7 +114,7 @@ export class Hud {
     this.settingsBtn = iconBtn('settings', t('hud.settings'), () => this.h.toggleSettings());
     this.baseBtn = iconBtn('base', `${t('hud.mainBase')} (U)`, () => this.h.toggleMainBase());
     this.hud.append(
-      this.poolPill,
+      el('div', { class: 'hud-center' }, this.poolPill, this.comboStat),
       el('div', { class: 'hud-right' }, this.creditsPill, el('div', { class: 'pill menu' }, this.flagBtn, this.baseBtn, this.settingsBtn)),
     );
     if (this.game) this.paint();

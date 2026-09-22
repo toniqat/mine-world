@@ -25,4 +25,4 @@ Game state is stored in the renderer's IndexedDB, the same as in the browser.
 npx electron . --exec=script.js --screenshot=out.png
 ```
 
-`--exec` runs a script in the page after load (the page exposes `window.mineWorld`, the `App` instance); `--screenshot` captures the window ~2.5 s later and quits. If `ELECTRON_RUN_AS_NODE=1` is inherited from an IDE terminal, prefix with `env -u ELECTRON_RUN_AS_NODE` (the npm scripts already clear it).
+`--size=390x844` sets the window's content size and lifts the 720 × 480 minimum, for checking the phone layout (touch rules need a real coarse pointer and are not emulated). `--exec` runs a script in the page after load (the page exposes `window.mineWorld`, the `App` instance); `--screenshot` captures the window ~2.5 s later and quits. If `ELECTRON_RUN_AS_NODE=1` is inherited from an IDE terminal, prefix with `env -u ELECTRON_RUN_AS_NODE` (the npm scripts already clear it).
