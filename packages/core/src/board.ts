@@ -4,11 +4,11 @@ import { cellKey } from './key';
 export const CellState = {
   Unknown: 0,
   Flag: 1,
-  /** Settled, correct flag: an owned mine producing income. */
+  /** Settled, correct flag: an owned mine (a base). */
   Owned: 2,
   /** A mine that was stepped on. Lost. */
   Exploded: 3,
-  /** A real mine whose claim batch contained a wrong flag: forfeited, no income. */
+  /** A real mine whose claim batch contained a wrong flag: forfeited, not a base. */
   Lost: 4,
   /** Terrain walls: no tile, never a mine, no number. Never stored; `Board.terrain` supplies them. */
   Mountain: 5,

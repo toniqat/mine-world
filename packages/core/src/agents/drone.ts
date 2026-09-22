@@ -33,7 +33,7 @@ export interface StallComponent {
   undetermined: number;
   /** Lowest P(mine) among undetermined cells, when probabilities are available. */
   minProb: number | null;
-  /** Expected value of the mines still hidden in the component, when available. */
+  /** Expected number of mines still hidden in the component, when available. */
   estValue: number | null;
   cells: number[];
 }
@@ -83,7 +83,6 @@ export interface DroneHost {
   analyze(x0: number, y0: number, x1: number, y1: number, mode: 'belief' | 'public'): SolveResult;
   reveal(x: number, y: number, actor: { kind: 'drone'; id: number }, basis?: number[]): { hit: boolean };
   setFlag(x: number, y: number, on: boolean, actor: { kind: 'drone'; id: number }): void;
-  mineValueAt(x: number, y: number): number;
   hasProbabilities(): boolean;
   droneRadius(): number;
   droneActionsPerSec(): number;
@@ -417,7 +416,7 @@ export class DroneManager {
           const p = res.probabilities.get(k);
           if (p === undefined) continue;
           if (minProb === null || p < minProb) minProb = p;
-          est = (est ?? 0) + p * host.mineValueAt(keyX(k), keyY(k));
+          est = (est ?? 0) + p;
         }
       }
       d.stall.push({ size: c.size, undetermined: c.undetermined, minProb, estValue: est, cells: c.cells });

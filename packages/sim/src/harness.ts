@@ -22,6 +22,7 @@ function makeGame(density: number, seed: number, opts: HarnessOptions): Game {
     world: { uniformDensity: density, startSafeRadius: 3, terrainEnabled: false },
     fog: { enabled: false },
     tiers: { enabled: false },
+    econ: { storageBase: Infinity },
     resolve: { interventionMode: opts.interventionMode },
     solver: {
       ...(opts.t3MaxCells !== undefined ? { t3MaxCells: opts.t3MaxCells } : {}),

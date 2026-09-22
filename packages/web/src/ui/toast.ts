@@ -16,12 +16,24 @@ export class Toasts {
   }
 }
 
+/** How long a dialog takes to drop in or lift away (matches style.css). */
+const MODAL_MS = 200;
+
+/** Confirm dialog: the backdrop fades in while the box drops from a little above; closing plays it backwards. */
 export function confirmDialog(root: HTMLElement, message: string, yes: string, no: string): Promise<boolean> {
   return new Promise((resolve) => {
+    let done = false;
     const close = (v: boolean) => {
-      root.hidden = true;
-      root.replaceChildren();
+      if (done) return;
+      done = true;
+      root.classList.remove('show');
       resolve(v);
+      setTimeout(() => {
+        // A new dialog may have opened meanwhile.
+        if (root.classList.contains('show')) return;
+        root.hidden = true;
+        root.replaceChildren();
+      }, MODAL_MS);
     };
     const box = el(
       'div',
@@ -36,6 +48,8 @@ export function confirmDialog(root: HTMLElement, message: string, yes: string, n
     );
     root.replaceChildren(box);
     root.hidden = false;
+    void root.offsetWidth;
+    root.classList.add('show');
     root.onclick = (e) => {
       if (e.target === root) close(false);
     };

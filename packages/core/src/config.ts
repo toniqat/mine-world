@@ -75,14 +75,20 @@ export interface ResolveConfig {
 }
 
 export interface EconConfig {
-  /** Value of a mine at densityMin. TODO(sim). */
-  baseValue: number;
-  /** densityMultiplier(d) = 2 ^ ((d - densityMin) / densityDoubling). TODO(sim): match inverse ambiguity rate. */
+  /** densityMultiplier(d) = 2 ^ ((d - densityMin) / densityDoubling); only the prestige gain uses it now. */
   densityDoubling: number;
-  /** One-time payout on settlement = sum(mineValue) * this * streakMult. */
-  settlementPayoutMult: number;
-  /** Passive income per turn (one tile-changing player action) per owned mine = mineValue * this. */
-  incomePerTurnMult: number;
+  /**
+   * Points (user decision 2026-09-22): every opened cell earns `tilePoints`,
+   * every base a settlement creates `basePoints`, both x the point multiplier
+   * (bases x streak x prestige), into the unbanked pool.
+   */
+  tilePoints: number;
+  basePoints: number;
+  /** Base multiplier = 1 + this x active bases (linked, not disabled; grand complex members count their bonus). */
+  multPerBase: number;
+  /** Unbanked pool cap = storageBase x storageGrowth^(main-base level - 1). Full: nothing more can be opened until Cash Out. */
+  storageBase: number;
+  storageGrowth: number;
   /** Streak multiplier grows by this per safe player click, capped at streakMultCap. */
   streakMultPerClick: number;
   streakMultCap: number;
@@ -94,7 +100,7 @@ export interface EconConfig {
   wrongFlagLossFraction: number;
   /** Prestige: cores = floor(sum(densityMultiplier of owned mines) / prestigeDivisor). */
   prestigeDivisor: number;
-  /** Each core adds this fraction to all mine values. */
+  /** Each core adds this fraction to the point multiplier. */
   prestigeBonusPerCore: number;
   /** Minimum owned mines before liquidation is offered. */
   prestigeMinOwned: number;
@@ -114,14 +120,12 @@ export interface DroneConfig {
 export interface BaseConfig {
   /** Speed of the (cosmetic) shipment animation along the base network, tiles per second. */
   transportTilesPerSec: number;
-  /** All base production x growth^(level - 1). The main base itself produces nothing. */
-  levelProdGrowth: number;
   mainCostBase: number;
   mainCostGrowth: number;
   maxLevel: number;
   /** A complex of at least this many bases is a grand complex. */
   grandMinBases: number;
-  /** Grand complex: each member produces x(1 + this x members). */
+  /** Grand complex: each member counts x(1 + this x members) towards the base multiplier. */
   grandBonusPerBase: number;
 }
 
@@ -161,8 +165,6 @@ export interface TierConfig {
   enabled: boolean;
   /** Distance (tiles, Euclidean from the main base) at which tier 2, 3, ... begin. */
   radii: number[];
-  /** Mine value (settlement payout and production) multiplier per tier (index 0 = tier 1). */
-  valueMult: number[];
 }
 
 export interface GameConfig {
@@ -218,10 +220,12 @@ export const DEFAULT_CONFIG: GameConfig = {
     forgivingRescues: 3,
   },
   econ: {
-    baseValue: 10, // TODO(play)
     densityDoubling: 0.06, // sim: local stalls/1000 go 12 -> 64 and hits 0 -> 12 between 12% and 35%
-    settlementPayoutMult: 1,
-    incomePerTurnMult: 0.02, // user decision: the old per-second value, now per turn; TODO(play)
+    tilePoints: 1, // user decision 2026-09-22
+    basePoints: 5, // user decision 2026-09-22
+    multPerBase: 0.1, // user decision 2026-09-22
+    storageBase: 1000, // user decision 2026-09-22
+    storageGrowth: 1.5, // TODO(play)
     streakMultPerClick: 0.02,
     streakMultCap: 3,
     streakCapPerLevel: 0.5,
@@ -241,7 +245,6 @@ export const DEFAULT_CONFIG: GameConfig = {
   },
   bases: {
     transportTilesPerSec: 4, // animation only: credits arrive every turn
-    levelProdGrowth: 1.15, // user decision: each main-base level raises every base a little
     mainCostBase: 150, // TODO(play)
     mainCostGrowth: 1.6, // TODO(play)
     maxLevel: 50,
@@ -262,7 +265,6 @@ export const DEFAULT_CONFIG: GameConfig = {
   tiers: {
     enabled: true,
     radii: [24, 48, 88, 128], // user decision 2026-09-22: the old rings (48, 128) split in half; TODO(play)
-    valueMult: [1, 1.5, 2, 3, 4], // TODO(play)
   },
 };
 

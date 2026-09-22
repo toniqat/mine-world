@@ -7,7 +7,7 @@ import { hash01 } from '../hash';
  * is immune). The radius is rolled in the range of the mine's mining tier
  * (`radiusByTier`), so mines in higher tiers blast wider.
  *
- * A disabled base produces nothing and is not a base for the network until it
+ * A disabled base does not count towards the multiplier and is not a base for the network until it
  * is repaired; repairs cost more the more of the world is opened.
  */
 export interface BlastRange {

@@ -1,5 +1,5 @@
-import { UPGRADES, keyX, keyY, type BaseInfo, type Game, type LogEntry } from '@mine/core';
-import { clock, fmt } from '../format';
+import { UPGRADES, keyX, keyY, type BaseInfo, type Game } from '@mine/core';
+import { fmt } from '../format';
 import { getLang, t, upgradeDesc, upgradeName, type StringKey } from '../i18n';
 import type { Settings } from '../storage';
 import { clear, el } from './dom';
@@ -10,16 +10,20 @@ export interface PanelHandlers {
   gotoCell(x: number, y: number): void;
   upgradeMainBase(): void;
   repairBase(x: number, y: number): void;
-  liquidate(): void;
   newGame(): void;
   saveNow(): void;
   settingsChanged(s: Settings): void;
   close(): void;
 }
 
+/** How long the popover takes to drop in or lift away (matches style.css). */
+const POP_MS = 180;
+
 /**
- * Right-hand side panel: the selected base (the main base doubles as the
- * upgrade screen), log, stats and settings. Re-rendered from game state on demand.
+ * Popover under the top-right capsule, like a context menu: the selected
+ * base (the main base doubles as the upgrade screen) or settings. It drops in
+ * from a little above while fading in, scrolls vertically when it runs long,
+ * and is re-rendered from game state on demand.
  */
 export class Panels {
   current: PanelName | null = null;
@@ -29,6 +33,7 @@ export class Panels {
   private title: HTMLElement;
   /** Header slot left of the close button (the main base's level-up). */
   private headExtra: HTMLElement;
+  private hideTimer = 0;
 
   constructor(
     private root: HTMLElement,
@@ -44,9 +49,23 @@ export class Panels {
   }
 
   open(name: PanelName | null, game: Game, settings: Settings): void {
+    const was = this.current;
     this.current = name;
-    this.root.hidden = name === null;
-    if (name) this.render(game, settings);
+    clearTimeout(this.hideTimer);
+    if (name === null) {
+      if (was === null) return;
+      this.root.classList.remove('show');
+      this.hideTimer = window.setTimeout(() => (this.root.hidden = true), POP_MS);
+      return;
+    }
+    this.render(game, settings);
+    if (was === name && !this.root.hidden) return;
+    // Switching from one popover to another drops the new one in again.
+    this.root.classList.remove('show');
+    this.root.hidden = false;
+    void this.root.offsetWidth;
+    this.root.classList.add('show');
+    this.body.scrollTop = 0;
   }
 
   render(game: Game, settings: Settings): void {
@@ -58,12 +77,6 @@ export class Panels {
     switch (this.current) {
       case 'base':
         this.renderBase(game);
-        break;
-      case 'log':
-        this.renderLog(game);
-        break;
-      case 'stats':
-        this.renderStats(game);
         break;
       case 'settings':
         this.renderSettings(game, settings);
@@ -85,7 +98,7 @@ export class Panels {
     else this.renderOtherBase(game, b);
   }
 
-  /** Main base: level and level-up in the header; network summary and upgrades below. */
+  /** Main base: level and level-up in the header; multiplier, pool cap and upgrades below. */
   private renderMainBase(game: Game, b: BaseInfo): void {
     const bases = game.bases;
     this.title.textContent = `${t('base.main')} ${t('level', { n: b.level })}`;
@@ -101,15 +114,16 @@ export class Panels {
 
     let active = 0;
     for (const k of game.econ.owned.keys()) if (bases.isBase(k) && !bases.isolated.has(k)) active++;
-    const rate = game.econ.incomeRate;
+    const e = game.econ;
     this.body.append(
-      el('div', { class: 'help', text: t('base.mainHint', { g: bases.cfg.levelProdGrowth.toFixed(2) }) }),
-      kv(t('base.network'), t('base.perTurn', { v: fmt(rate) })),
+      el('div', { class: 'help', text: t('base.mainHint', { tile: e.cfg.tilePoints, base: e.cfg.basePoints, per: e.cfg.multPerBase }) }),
+      kv(t('base.mult'), `×${e.baseMult.toFixed(2)}`),
       kv(t('base.active'), String(active)),
     );
     if (bases.isolated.size) this.body.append(kv(t('base.isolatedCount'), String(bases.isolated.size)));
     if (bases.disabled.size) this.body.append(kv(t('base.disabledCount'), String(bases.disabled.size)));
-    if (!bases.maxed()) this.body.append(kv(t('base.nextLevel'), t('base.upgrade.next', { n: b.level + 1, prod: bases.levelMult(b.level + 1).toFixed(2) })));
+    this.body.append(kv(t('base.capacity'), fmt(e.capacity)));
+    if (!bases.maxed()) this.body.append(kv(t('base.nextLevel'), t('base.upgrade.next', { n: b.level + 1, cap: fmt(bases.capacity(b.level + 1)) })));
 
     this.body.append(el('div', { class: 'section', text: t('base.upgrades') }));
     for (const u of UPGRADES.filter((x) => x.group === 'misc')) this.body.append(this.upgradeRow(game, u.id));
@@ -128,7 +142,7 @@ export class Panels {
     const r = c.radii[tier - 2];
     if (r === undefined) return null;
     const range = game.cfg.blast.radiusByTier[Math.min(game.cfg.blast.radiusByTier.length - 1, tier - 1)];
-    return t('up.mining.now', { c: tier - 1, t: tier, r, m: c.valueMult[Math.min(c.valueMult.length - 1, tier - 1)], min: range[0], max: range[1] });
+    return t('up.mining.now', { c: tier - 1, t: tier, r, min: range[0], max: range[1] });
   }
 
   private upgradeRow(game: Game, id: string): HTMLElement {
@@ -188,12 +202,8 @@ export class Panels {
     }
     this.title.textContent = `${b.isolated ? t('base.isolated') : t('base.name')} (${b.x}, ${b.y})`;
     if (b.isolated) this.body.append(el('div', { class: 'help', text: t('base.isolatedHint') }));
-    this.body.append(
-      kv(t('base.rate'), t('base.perTurn', { v: fmt(b.rate) })),
-      kv(t('base.produced'), fmt(b.produced)),
-      kv(t('base.level'), t('level', { n: b.level })),
-    );
-    if (b.complexSize > 1) this.body.append(kv(t('base.complex'), t('base.complexValue', { n: b.complexSize, v: fmt(b.complexRate) })));
+    this.body.append(kv(t('base.multShare'), `+${b.multShare.toFixed(2)}`));
+    if (b.complexSize > 1) this.body.append(kv(t('base.complex'), t('base.complexValue', { n: b.complexSize })));
     if (b.complexBonus > 1) this.body.append(kv(t('base.grand'), `×${b.complexBonus.toFixed(2)}`));
     if (!b.isolated) this.body.append(kv(t('base.route'), b.route ? t('base.routeValue', { n: b.route, hops: b.hops }) : t('base.inMain')));
     if (b.children) this.body.append(kv(t('base.children'), String(b.children)));
@@ -206,100 +216,6 @@ export class Panels {
     }
   }
 
-  private renderLog(game: Game): void {
-    const entries = game.log.slice().reverse();
-    if (!entries.length) {
-      this.body.append(el('div', { class: 'help', text: t('log.empty') }));
-      return;
-    }
-    for (const e of entries.slice(0, 120)) this.body.append(this.logRow(e));
-  }
-
-  private logRow(e: LogEntry): HTMLElement {
-    const d = e.data as Record<string, number | string | number[]>;
-    let text: string;
-    switch (e.kind) {
-      case 'hit':
-        text = (d.disabled as number) > 0 ? t('log.hitBlast', { x: e.x!, y: e.y!, loss: fmt(d.loss as number), n: d.disabled as number }) : t('log.hit', { x: e.x!, y: e.y!, loss: fmt(d.loss as number) });
-        break;
-      case 'repair':
-        text = t('log.repair', { x: e.x!, y: e.y!, cost: fmt(d.cost as number) });
-        break;
-      case 'settlement':
-        text = t('log.settlement', { x: e.x!, y: e.y!, correct: d.correct as number, wrong: d.wrong as number, payout: fmt(d.payout as number) });
-        break;
-      case 'drone_explode':
-        text = t('log.drone_explode', { drone: d.drone as number, x: e.x!, y: e.y!, n: (d.basis as number[]).length });
-        break;
-      case 'audit':
-        text = t('log.audit', { wrong: d.wrong as number, total: d.total as number });
-        break;
-      case 'scanner':
-        text = t('log.scanner', { x: e.x!, y: e.y!, r: d.r as number, n: d.n as number });
-        break;
-      case 'probe':
-        text = t('log.probe', { x: e.x!, y: e.y!, result: d.mine ? t('log.probe.mine') : t('log.probe.safe') });
-        break;
-      case 'prestige':
-        text = t('log.prestige', { gain: d.gain as number });
-        break;
-      case 'cashout':
-        text = t('log.cashout', { amount: fmt(d.amount as number) });
-        break;
-      case 'purchase':
-        text = t('log.purchase', { name: upgradeName(String(d.id)) });
-        break;
-      default:
-        text = String(d.text ?? e.kind);
-    }
-    const hasPos = e.x !== undefined && e.y !== undefined;
-    const textEl = el('span', { class: 'text' + (hasPos ? ' link' : ''), text, onclick: () => hasPos && this.h.gotoCell(e.x!, e.y!) });
-    const row = el('div', { class: `log-entry ${e.kind}` }, el('span', { class: 'time', text: clock(e.t) }), textEl);
-    if (e.kind === 'drone_explode' && (d.basis as number[]).length) {
-      const chips = el('div', {});
-      for (const k of (d.basis as number[]).slice(0, 12)) {
-        chips.append(el('span', { class: 'chip', text: `(${keyX(k)}, ${keyY(k)})`, onclick: () => this.h.gotoCell(keyX(k), keyY(k)) }));
-      }
-      textEl.append(el('div', { class: 'desc', text: t('log.basis') }), chips);
-    }
-    return row;
-  }
-
-  private renderStats(game: Game): void {
-    const e = game.econ;
-    const L = e.lifetime;
-    const kv = (label: string, value: string) => el('div', { class: 'kv' }, el('span', {}, label), el('span', { class: 'v', text: value }));
-    this.body.append(
-      el('div', { class: 'section', text: t('stats.session') }),
-      kv(t('stats.owned'), String(e.owned.size)),
-      kv(t('stats.incomeRate'), fmt(e.incomeRate)),
-      kv(t('stats.flags'), String(game.board.flagCount)),
-      kv(t('stats.cellsRevealed'), String(game.board.revealedCount)),
-      kv(t('stats.interventions'), String(game.stats.interventions)),
-      kv(t('stats.time'), clock(game.time)),
-      el('div', { class: 'section', text: t('stats.lifetime') }),
-      kv(t('stats.earned'), fmt(L.earned)),
-      kv(t('stats.minesOwned'), String(L.minesOwned)),
-      kv(t('stats.settlements'), String(L.settlements)),
-      kv(t('stats.cellsRevealed'), String(L.cellsRevealed)),
-      kv(t('stats.hits'), String(L.hits)),
-      kv(t('stats.wrongFlags'), String(L.wrongFlags)),
-      kv(t('stats.bestStreak'), String(L.bestStreak)),
-      kv(t('stats.bestUnbanked'), fmt(L.bestUnbanked)),
-    );
-    const p = game.prestigePreview();
-    const box = el(
-      'div',
-      { class: 'prestige' },
-      el('h3', { text: t('prestige.title') }),
-      el('p', { text: t('prestige.desc') }),
-      kv(t('prestige.cores'), String(e.cores)),
-      kv(t('prestige.gain'), `+${p.gain}`),
-    );
-    if (!p.allowed) box.append(el('p', { text: t('prestige.need', { n: game.cfg.econ.prestigeMinOwned, have: p.owned }) }));
-    box.append(el('button', { class: 'btn danger', disabled: !p.allowed || p.gain <= 0, text: t('prestige.button'), onclick: () => this.h.liquidate() }));
-    this.body.append(box);
-  }
 
   private renderSettings(game: Game, s: Settings): void {
     const field = (label: string, control: HTMLElement) => el('div', { class: 'field' }, el('span', {}, label), control);

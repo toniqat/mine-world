@@ -24,10 +24,11 @@ export interface UpgradeDef {
 
 export const UPGRADES: UpgradeDef[] = [
   { id: 'streak_cap', group: 'misc', maxLevel: 5, baseCost: 500, growth: 2.5 },
-  // Mining technology: level n opens tier n + 1 (config.tiers). Each level costs ~60 % of the
-  // settlement value of every mine in the tier it follows (sim: tiers 1-4 hold ~17k / 108k /
-  // 663k / 1.77M at streak x1), so clearing most of a tier buys the next one. TODO(play)
-  { id: 'mining', group: 'tech', maxLevel: 4, baseCost: 10_000, growth: 1, costs: [10_000, 65_000, 400_000, 1_050_000] },
+  // Mining technology: level n opens tier n + 1 (config.tiers). Rough estimate for the point
+  // economy (2026-09-22, not simulated): clearing tier 1 earns ~20-50k points, tier 2 ~0.3M,
+  // tier 3 ~3M, tier 4 ~15M, as the base multiplier grows with the bases; each level costs about
+  // half of what the tier before it pays. TODO(play)
+  { id: 'mining', group: 'tech', maxLevel: 4, baseCost: 10_000, growth: 1, costs: [10_000, 150_000, 1_500_000, 6_000_000] },
 ];
 
 const BY_ID = new Map(UPGRADES.map((u) => [u.id, u]));

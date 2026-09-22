@@ -1,7 +1,7 @@
 import { Application } from 'pixi.js';
 import { CellState, Game, cellKey, isRevealed, keyX, keyY, type SaveData } from '@mine/core';
 import { DemoPlayer } from './demo';
-import { fmt, pct } from './format';
+import { fmt } from './format';
 import { resolveLang, setLang, t, upgradeName } from './i18n';
 import { InputController } from './input';
 import { BoardView } from './render/boardView';
@@ -16,8 +16,11 @@ import { Toasts, confirmDialog } from './ui/toast';
 
 /** The demo board behind the title fades out over this long once Start is pressed. */
 const DEMO_FADE_MS = 500;
-/** Zoom of the title-screen demo. */
-const DEMO_ZOOM = 1.25;
+/** Zoom of the title-screen demo (a wider view than play, so the camera barely moves). */
+const DEMO_ZOOM = 0.94;
+/** A finished demo world fades to black over this long (seconds), stays black, then the next one fades in. */
+const DEMO_SWAP_FADE = 0.9;
+const DEMO_SWAP_HOLD = 0.5;
 
 /** Wires core Game <-> Pixi renderer <-> DOM chrome. */
 export class App {
@@ -43,6 +46,8 @@ export class App {
   private title: TitleScreen | null = null;
   /** When Start was pressed: the demo board fades out from then. */
   private leavingAt = 0;
+  /** A finished demo world fading to black, holding, or the next one fading in. */
+  private demoSwap: { phase: 'out' | 'black' | 'in'; t: number } | null = null;
   private hint: StartHint | null = null;
   private readonly hasSave: boolean;
   private readonly appEl = document.getElementById('app')!;
@@ -71,10 +76,9 @@ export class App {
     this.view = new BoardView(this.app, this.demo.game, palette);
     this.app.stage.addChild(this.view.root);
     this.toasts = new Toasts(document.getElementById('toasts')!);
-    this.hud = new Hud(document.getElementById('hud')!, document.getElementById('statusbar')!, {
+    this.hud = new Hud(document.getElementById('hud')!, {
       cashOut: () => this.cashOut(),
-      togglePanel: (n) => this.togglePanel(n),
-      toggleMain: () => this.toggleMain(),
+      toggleSettings: () => this.togglePanel('settings'),
       home: () => this.goHome(),
       toggleFlagMode: () => this.setFlagMode(!this.flagMode),
     });
@@ -83,7 +87,6 @@ export class App {
       gotoCell: (x, y) => this.gotoCell(x, y),
       upgradeMainBase: () => this.upgradeMainBase(),
       repairBase: (x, y) => this.repairBase(x, y),
-      liquidate: () => this.liquidate(),
       newGame: () => this.restart(),
       saveNow: () => this.save(true),
       settingsChanged: (s) => this.applySettings(s),
@@ -132,7 +135,6 @@ export class App {
       this.view.setDroneTiming(acc, this.game.droneActionsPerSec(), this.game.droneMoveSpeed());
       this.view.update(this.cam);
       this.hud.update(this.game);
-      this.hud.setRight(`${t('status.zoom')} ${Math.round(this.cam.zoom * 100)}% · ${t('status.seed')} ${this.game.cfg.seed}`);
       if (this.dirty && performance.now() - this.lastSave > 15000) void this.save(false);
       this.panelTimer += dt;
       if (this.panels.current === 'base' && this.panelTimer > 1) {
@@ -144,20 +146,45 @@ export class App {
 
   // ------------------------------------------------------------ title screen
 
-  /** The demo plays itself; the camera drifts after the cell it last touched. */
+  /**
+   * The demo plays itself; the camera drifts slowly after the patch it digs.
+   * When the bot is stuck the board fades out to black, the next world is
+   * made while the screen is black, and it fades in.
+   */
   private tickDemo(demo: DemoPlayer, dt: number, gameDt: number): void {
     if (this.leavingAt) {
-      this.view.root.alpha = Math.max(0, 1 - (performance.now() - this.leavingAt) / DEMO_FADE_MS);
+      this.view.root.alpha = Math.min(this.view.root.alpha, Math.max(0, 1 - (performance.now() - this.leavingAt) / DEMO_FADE_MS));
       return;
     }
-    if (demo.tick(dt)) {
-      this.view.setGame(demo.game);
-      this.bindGame(demo.game, true);
+    const swap = this.demoSwap;
+    if (swap) {
+      swap.t += dt;
+      let dark = 1;
+      if (swap.phase === 'out') {
+        dark = Math.min(1, swap.t / DEMO_SWAP_FADE);
+        if (swap.t >= DEMO_SWAP_FADE) {
+          demo.next();
+          this.view.setGame(demo.game);
+          this.bindGame(demo.game, true);
+          this.cam.zoom = DEMO_ZOOM;
+          this.cam.centerOnCell(0, 0);
+          this.demoSwap = { phase: 'black', t: 0 };
+        }
+      } else if (swap.phase === 'black') {
+        if (swap.t >= DEMO_SWAP_HOLD) this.demoSwap = { phase: 'in', t: 0 };
+      } else {
+        dark = Math.max(0, 1 - swap.t / DEMO_SWAP_FADE);
+        if (swap.t >= DEMO_SWAP_FADE) this.demoSwap = null;
+      }
+      this.view.root.alpha = 1 - dark;
+      this.title?.setBlack(dark);
     }
+    if (!swap || swap.phase === 'in') demo.tick(dt);
+    if (!this.demoSwap && demo.over) this.demoSwap = { phase: 'out', t: 0 };
     if (gameDt) demo.game.tick(gameDt);
-    const k = 1 - Math.exp(-dt * 0.9);
-    this.cam.x += ((demo.focus.x + 0.5) * CELL - this.cam.x) * k;
-    this.cam.y += ((demo.focus.y + 0.5) * CELL - this.cam.y) * k;
+    const k = 1 - Math.exp(-dt * 0.8);
+    this.cam.x += ((demo.view.x + 0.5) * CELL - this.cam.x) * k;
+    this.cam.y += ((demo.view.y + 0.5) * CELL - this.cam.y) * k;
   }
 
   /**
@@ -178,6 +205,7 @@ export class App {
     }
     this.title.leave();
     this.title = null;
+    this.demoSwap = null;
     this.leavingAt = performance.now();
     this.appEl.classList.remove('titling');
     this.appEl.classList.add('intro');
@@ -256,14 +284,7 @@ export class App {
         if (!demo && this.panels.current === 'base') this.refreshPanel();
       }),
     );
-    if (!demo) {
-      this.unsub.push(
-        on('econ', () => (this.dirty = true)),
-        on('log', () => {
-          if (this.panels.current === 'log') this.refreshPanel();
-        }),
-      );
-    }
+    if (!demo) this.unsub.push(on('econ', () => (this.dirty = true)));
     this.view.setScanners(g.scanners);
     this.syncDrones(g);
   }
@@ -293,7 +314,13 @@ export class App {
       this.game.cycleMark(c.x, c.y);
       return;
     }
-    if (s === CellState.Unknown) this.game.reveal(c.x, c.y);
+    if (s === CellState.Unknown && this.game.reveal(c.x, c.y).full) this.poolFull();
+  }
+
+  /** Something tried to open a tile while the unbanked pool is full: say Cash Out comes first. */
+  private poolFull(): void {
+    this.hud.nudgeFull();
+    this.toasts.show(t('toast.full'), 'bad');
   }
 
   /**
@@ -303,7 +330,7 @@ export class App {
   private chordAt(c: { x: number; y: number }): void {
     this.view.rippleFrom = cellKey(c.x, c.y);
     try {
-      this.game.chord(c.x, c.y);
+      if (this.game.chord(c.x, c.y).full) this.poolFull();
     } finally {
       this.view.rippleFrom = null;
     }
@@ -364,11 +391,6 @@ export class App {
 
   private onHover(c: { x: number; y: number } | null): void {
     this.view.setHover(c);
-    if (c) {
-      const d = this.game.densityAt(c.x, c.y);
-      const tier = this.game.cfg.tiers.enabled && this.game.world.started ? ` · ${t('status.tier')} ${this.game.tierAt(c.x, c.y)}` : '';
-      this.hud.setCoords(`(${c.x}, ${c.y})${tier} · ${t('status.density')} ${pct(d)}${this.settings.showDensity ? ` · ${fmt(this.game.mineValueAt(c.x, c.y))}` : ''}`);
-    } else this.hud.setCoords('');
   }
 
   private onKey(code: string, ev: KeyboardEvent): void {
@@ -397,9 +419,6 @@ export class App {
       case 'KeyU':
         this.toggleMain();
         break;
-      case 'KeyL':
-        this.togglePanel('log');
-        break;
     }
   }
 
@@ -413,7 +432,7 @@ export class App {
   private cashOut(): void {
     if (this.game.econ.unbanked <= 0) return;
     const amt = this.game.cashOut();
-    this.toasts.show(t('toast.cashout', { amount: fmt(amt) }), 'good');
+    this.hud.cashedOut(amt);
   }
 
   private buy(id: string): void {
@@ -432,7 +451,7 @@ export class App {
     } else this.togglePanel('base');
   }
 
-  /** The HUD's main-base button and a click on the main base open the same panel. */
+  /** `U` and a click on the main base open the same panel. */
   private toggleMain(): void {
     const main = this.game.bases.main;
     if (this.panels.current === 'base' && (this.panels.base === null || this.panels.base === main)) return this.togglePanel(null);
@@ -459,19 +478,6 @@ export class App {
     this.refreshPanel();
   }
 
-  private async liquidate(): Promise<void> {
-    const ok = await confirmDialog(document.getElementById('modal')!, t('prestige.confirm'), t('confirm.yes'), t('confirm.no'));
-    if (!ok) return;
-    const gain = this.game.liquidate();
-    if (gain === null) return;
-    this.toasts.show(t('toast.prestige', { gain }), 'good', 5000);
-    this.view.setGame(this.game);
-    this.bindGame();
-    this.centerOnStart();
-    this.refreshPanel();
-    this.syncHint();
-    void this.save(true);
-  }
 
   private async restart(): Promise<void> {
     const ok = await confirmDialog(document.getElementById('modal')!, t('settings.newGame.confirm'), t('confirm.yes'), t('confirm.no'));
@@ -513,10 +519,7 @@ export class App {
   }
 
   private syncHudActive(): void {
-    const cur = this.panels.current;
-    if (cur !== 'base') return this.hud.setActive(cur);
-    const main = this.panels.base === null || this.panels.base === this.game.bases.main;
-    this.hud.setActive(main ? 'main' : null);
+    this.hud.setActive(this.panels.current === 'settings' ? 'settings' : null);
   }
 
   private refreshPanel(): void {

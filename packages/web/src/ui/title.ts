@@ -12,6 +12,8 @@ export const TITLE_LEAVE_MS = 700;
  */
 export class TitleScreen {
   private root: HTMLElement;
+  /** Black layer between the demo and the film, for the fade from one demo world to the next. */
+  private black: HTMLElement;
 
   constructor(
     host: HTMLElement,
@@ -20,16 +22,23 @@ export class TitleScreen {
   ) {
     const grain = el('div', { class: 'film-grain' });
     grain.style.backgroundImage = `url(${noiseTile()})`;
+    this.black = el('div', { class: 'demo-black' });
     const primary = el('button', { class: 'btn primary title-start', text: hasSave ? t('title.continue') : t('title.start'), onclick: () => this.on.start() });
     this.root = el(
       'div',
       { class: 'title' },
+      this.black,
       el('div', { class: 'film' }, grain, el('div', { class: 'film-lines' }), el('div', { class: 'film-flicker' }), el('div', { class: 'film-vignette' })),
       el('h1', { class: 'title-logo', text: 'MINEWORLD' }),
       el('div', { class: 'title-actions' }, primary, hasSave ? el('button', { class: 'btn title-new', text: t('title.newGame'), onclick: () => this.on.newGame() }) : null),
     );
     host.append(this.root);
     requestAnimationFrame(() => primary.focus());
+  }
+
+  /** How black the demo is (0 clear, 1 black). */
+  setBlack(v: number): void {
+    this.black.style.opacity = String(v);
   }
 
   /** Slide the logo up and the buttons down while everything fades; removes itself when done. */

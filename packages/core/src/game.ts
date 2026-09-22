@@ -34,6 +34,8 @@ export interface RevealResult {
   hit: boolean;
   revealed: number;
   intervened: boolean;
+  /** Nothing opened because the unbanked pool is full (Cash Out first). */
+  full?: boolean;
 }
 
 export interface HitEvent {
@@ -76,7 +78,6 @@ export interface SettlementEvent {
   correct: number;
   wrong: number;
   payout: number;
-  income: number;
   loss: number;
   cells: number[];
 }
@@ -236,18 +237,13 @@ export class Game {
     return this.cfg.tiers.enabled && this.tierAt(x, y) > this.miningTier();
   }
 
-  /** Mine value multiplier of the cell's tier. */
-  tierValueMult(x: number, y: number): number {
-    const m = this.cfg.tiers.valueMult;
-    return m.length ? m[Math.min(m.length - 1, this.tierAt(x, y) - 1)] : 1;
-  }
-
   densityAt(x: number, y: number): number {
     return this.world.density(x, y);
   }
 
-  mineValueAt(x: number, y: number): number {
-    return this.econ.mineValue(this.world.density(x, y)) * this.tierValueMult(x, y);
+  /** The unbanked pool is full: nothing can be opened until Cash Out. */
+  full(): boolean {
+    return this.econ.full();
   }
 
   /** Solver tiers of the drone equipment (none unless equipped). */
@@ -334,6 +330,7 @@ export class Game {
       this.updateFog();
     }
     if (this.fogged(x, y) || this.locked(x, y)) return { hit: false, revealed: 0, intervened: false };
+    if (this.econ.full()) return { hit: false, revealed: 0, intervened: false, full: true };
     this.inAction++;
     if (actor.kind === 'player') this.turnPending = true;
     const r = resolveReveal({ cfg: this.cfg, ctx: this.ctx, rescues: this.rescues }, x, y, !this.chording);
@@ -356,6 +353,7 @@ export class Game {
     } else {
       const n = this.cascade(x, y);
       if (actor.kind === 'player') this.econ.onSafeClick();
+      this.econ.gain(n * this.cfg.econ.tilePoints);
       this.econ.lifetime.cellsRevealed += n;
       result = { hit: false, revealed: n, intervened: r.intervened };
     }
@@ -367,7 +365,8 @@ export class Game {
   /**
    * Reveal every unknown neighbour of a satisfied number (classic chord), as
    * one action (one turn). The reveals are never rescued: a chord trusts the
-   * flags, so a wrong flag lets the real mine go off.
+   * flags, so a wrong flag lets the real mine go off. It stops once the
+   * unbanked pool fills up.
    */
   chord(x: number, y: number, actor: Actor = PLAYER): RevealResult {
     const s = this.board.get(x, y);
@@ -382,10 +381,12 @@ export class Game {
       else if (ns === CellState.Unknown && !this.fogged(nx, ny) && !this.locked(nx, ny)) targets.push([nx, ny]);
     });
     if (marked !== n || targets.length === 0) return out;
+    if (this.econ.full()) return { ...out, full: true };
     this.inAction++;
     this.chording = true;
     for (const [tx, ty] of targets) {
       const r = this.reveal(tx, ty, actor);
+      out.full = out.full || r.full;
       out.hit = out.hit || r.hit;
       out.revealed += r.revealed;
       out.intervened = out.intervened || r.intervened;
@@ -591,7 +592,7 @@ export class Game {
       this.setCell(x, y, CellState.Owned);
       const r = this.econ.onSettlement([{ key: cellKey(x, y), density: this.world.density(x, y) }], 0);
       this.basesDirty = true;
-      this.pushLog('probe', x, y, { mine: true, cost, income: r.income });
+      this.pushLog('probe', x, y, { mine: true, cost, payout: r.payout });
     } else {
       if (s === CellState.Flag) this.setCell(x, y, CellState.Unknown);
       const n = this.cascade(x, y);
@@ -739,9 +740,11 @@ export class Game {
     // lifting a flag cannot: the network treats a flag exactly like Unknown.
     if (!this.basesDirty && this.econ.owned.size && this.changed.some((c) => c.state !== CellState.Unknown && c.state !== CellState.Flag)) this.basesDirty = true;
     // One player action that changes tiles (an opening, a chord that opens
-    // something, placing a flag) is one turn: every linked base produces once,
-    // with the network as it stood before the action (no forced rebuild: that
-    // costs a full path search per action; new bases pay from the next turn).
+    // something, placing a flag) is one turn: every linked complex sends a
+    // (cosmetic) shipment, over the network as it stood before the action (no
+    // forced rebuild: that costs a full path search per action). The point
+    // multiplier is read from the same network: new bases count from the
+    // next rebuild.
     if (this.turnPending) {
       this.turnPending = false;
       this._bases.turn();
@@ -812,7 +815,7 @@ export class Game {
    * §9.2, see CLAUDE.md "Settlement batches").
    */
   private settle(batch: number[]): void {
-    const correct: Array<{ key: number; density: number; mult: number }> = [];
+    const correct: Array<{ key: number; density: number }> = [];
     const wrong: number[] = [];
     let ax = 0;
     let ay = 0;
@@ -823,7 +826,7 @@ export class Game {
       ay += y;
       // Truth is stable without an override; the resulting board state encodes it.
       const t = this.world.truth(x, y);
-      if (t === 1) correct.push({ key: k, density: this.world.density(x, y), mult: this.tierValueMult(x, y) });
+      if (t === 1) correct.push({ key: k, density: this.world.density(x, y) });
       else wrong.push(k);
     }
     const tainted = wrong.length > 0;
@@ -845,16 +848,15 @@ export class Game {
       correct: correct.length,
       wrong: wrong.length,
       payout: r.payout,
-      income: r.income,
       loss: r.loss,
       cells: batch,
     };
-    this.pushLog('settlement', ev.x, ev.y, { correct: ev.correct, wrong: ev.wrong, payout: ev.payout, income: ev.income, loss: ev.loss });
+    this.pushLog('settlement', ev.x, ev.y, { correct: ev.correct, wrong: ev.wrong, payout: ev.payout, loss: ev.loss });
     this.events.emit('settlement', ev);
     this.events.emit('econ', this.econ);
   }
 
-  /** Rebuild the base network and income. */
+  /** Rebuild the base network, the base multiplier and the pool cap. */
   private syncBases(): void {
     this.basesDirty = false;
     this._bases.recompute(this.mainBaseKey());
@@ -886,7 +888,6 @@ export class Game {
   // ------------------------------------------------------------------ save
 
   toSave(): SaveData {
-    // Rebuild first so the econ snapshot carries the current income rate.
     const bases = this.bases.snapshot();
     return {
       version: 1,

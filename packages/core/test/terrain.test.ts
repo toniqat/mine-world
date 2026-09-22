@@ -27,7 +27,7 @@ import {
 const ROUGH = { uniformDensity: 0.2, terrainMinRadius: 3, mountainThreshold: 0.55 };
 
 function roughGame(seed = 1): Game {
-  return new Game({ seed, fog: { enabled: false }, tiers: { enabled: false }, world: ROUGH, resolve: { interventionMode: 'FAIR' } } as never);
+  return new Game({ seed, fog: { enabled: false }, tiers: { enabled: false }, world: ROUGH, econ: { storageBase: Infinity }, resolve: { interventionMode: 'FAIR' } } as never);
 }
 
 /** First non-wall cell next to a wall whose own neighbourhood holds exactly one wall. */

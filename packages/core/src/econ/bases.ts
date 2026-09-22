@@ -6,13 +6,15 @@ import type { Econ } from './income';
 
 /**
  * Bases (user decisions 2026-09-21). Every Owned mine is a base; the start
- * cell (the first cell opened) is the main base. The main base produces
- * nothing itself: it is where goods turn into credits, and its level scales
- * the production of every other base.
+ * cell (the first cell opened) is the main base. Bases produce nothing by
+ * themselves (user decision 2026-09-22): every active base raises the point
+ * multiplier (`econ.baseMult` = 1 + multPerBase x the active bases, grand
+ * complex members counting their bonus), and the main-base level raises the
+ * unbanked pool's capacity (`econ.capacity`).
  *
- * Disabled: a base knocked out by a mine explosion (econ/blast.ts) produces
- * nothing and is not a base for anything below (complexes, network) until
- * it is repaired. The main base is never disabled.
+ * Disabled: a base knocked out by a mine explosion (econ/blast.ts) does not
+ * count and is not a base for anything below (complexes, network) until it
+ * is repaired. The main base is never disabled.
  *
  * Complexes: a base is *settled* when its 8 neighbours hold no Unknown or
  * flag and every number among them has faded out (no Unknown or flag next to
@@ -22,8 +24,8 @@ import type { Econ } from './income';
  * between members instantly; the complex holding the main base is the main
  * complex and pays at once. A complex's hub is its member closest to the
  * main base (Manhattan, then the smaller key). A complex of at least
- * `grandMinBases` bases is a grand complex: each member produces
- * x(1 + `grandBonusPerBase` x members).
+ * `grandMinBases` bases is a grand complex: each member counts
+ * x(1 + `grandBonusPerBase` x members) towards the base multiplier.
  *
  * Network: a tree of complexes rooted at the main complex, with no range
  * limit. Edges are tile paths (4-neighbourhood) that never cross an Unknown
@@ -36,19 +38,16 @@ import type { Econ } from './income';
  * and prefers going straight (few bends).
  *
  * Isolation: a complex with no chain of parents to the main complex (walled
- * in by Unknown cells) is isolated. It produces nothing and is not linked.
- * Opening a way out lifts isolation.
+ * in by Unknown cells) is isolated. It does not count towards the
+ * multiplier and is not linked. Opening a way out lifts isolation.
  *
- * Production is per turn (user decision 2026-09-21; flags count since
- * 2026-09-22): every player action that changes tiles
- * (`Game` calls `turn()`) credits each linked base's rate at once, wherever
- * it is. Shipments are only a picture of the link: each turn every producing
- * complex sends one down its edge, travelling edge by edge at `speed()`
- * tiles per second (one arriving at an intermediate complex continues at
- * once, joining its outgoing shipment if it has barely left). They carry no
- * credits.
+ * Shipments are only a picture of the link: every player action that changes
+ * tiles (`Game` calls `turn()`) each linked complex sends one down its edge,
+ * travelling edge by edge at `speed()` tiles per second (one arriving at an
+ * intermediate complex continues at once, joining its outgoing shipment if it
+ * has barely left). They carry nothing.
  *
- * Only the main base is levelled. Its level scales every base's production.
+ * Only the main base is levelled. Its level raises the pool's capacity.
  */
 export interface BaseInfo {
   key: number;
@@ -65,19 +64,15 @@ export interface BaseInfo {
   route: number;
   /** Edges on the route to the main base. */
   hops: number;
-  /** Credits per turn (0 for the main base, which only receives). */
-  rate: number;
-  /** Credits produced so far (delivered or not); 0 for the main base. */
-  produced: number;
-  /** No path to the main base avoiding Unknown cells: no production, no link. */
+  /** What this base adds to the base multiplier (0 for the main base, isolated and disabled bases). */
+  multShare: number;
+  /** No path to the main base avoiding Unknown cells: does not count, no link. */
   isolated: boolean;
-  /** Knocked out by an explosion: no production, no link, until repaired. */
+  /** Knocked out by an explosion: does not count, no link, until repaired. */
   disabled: boolean;
   /** Bases in this base's complex (1 when alone). */
   complexSize: number;
-  /** Credits per turn of the whole complex. */
-  complexRate: number;
-  /** Production multiplier of a grand complex (1 otherwise). */
+  /** Weight multiplier of a grand complex (1 otherwise). */
   complexBonus: number;
 }
 
@@ -89,7 +84,7 @@ export interface Complex {
   isolated: boolean;
   /** At least `grandMinBases` members. */
   grand: boolean;
-  /** Production multiplier from being a grand complex (1 otherwise). */
+  /** Weight multiplier from being a grand complex (1 otherwise). */
   bonus: number;
   /** Hub of the next complex towards the main base; null for the main complex and isolated ones. */
   parent: number | null;
@@ -99,8 +94,8 @@ export interface Complex {
   entry: number;
   /** Cells of the outgoing edge from `exit` to `entry` (4-neighbour steps); [hub] when there is none. */
   path: number[];
-  /** Credits per turn of all members. */
-  rate: number;
+  /** Weight of the members towards the base multiplier (0 when isolated). */
+  weight: number;
 }
 
 /** A (cosmetic) shipment on the edge `path` (exit -> entry), `d` tiles from its start. */
@@ -149,8 +144,8 @@ export class Bases {
   mainLevel = 1;
   /** Key of the main base, or null before the first cell is opened. */
   main: number | null = null;
-  /** Base key -> credits per turn (Owned mines only; 0 when isolated or disabled). */
-  readonly rates = new Map<number, number>();
+  /** Active bases weighted by their complex bonus (linked, not disabled, not the main base). */
+  weight = 0;
   /** Hub -> complex. */
   readonly complexes = new Map<number, Complex>();
   /** Base key -> hub of its complex. */
@@ -175,7 +170,9 @@ export class Bases {
     private econ: Econ,
     /** Board state of a cell (`CellState`). */
     private state: (x: number, y: number) => number,
-  ) {}
+  ) {
+    this.econ.capacity = this.capacity();
+  }
 
   isBase(key: number): boolean {
     if (key === this.main) return true;
@@ -183,11 +180,13 @@ export class Bases {
     return m !== undefined && !m.disabled;
   }
 
-  levelMult(level = this.mainLevel): number {
-    return Math.pow(this.cfg.levelProdGrowth, level - 1);
+  /** Unbanked pool capacity at a main-base level. */
+  capacity(level = this.mainLevel): number {
+    const c = this.econ.cfg;
+    return c.storageBase * Math.pow(c.storageGrowth, level - 1);
   }
 
-  /** Production multiplier of a complex with `n` members (grand complexes only). */
+  /** Weight multiplier of a complex with `n` members (grand complexes only). */
   grandBonus(n: number): number {
     return n >= this.cfg.grandMinBases ? 1 + this.cfg.grandBonusPerBase * n : 1;
   }
@@ -232,12 +231,11 @@ export class Bases {
   }
 
   /**
-   * Rebuild complexes, the tree, isolation and production rates; sets
-   * `econ.incomeRate` (per turn) and `formed`. Shipments in flight keep going.
+   * Rebuild complexes, the tree and isolation; sets `econ.baseMult`,
+   * `econ.capacity` and `formed`. Shipments in flight keep going.
    */
   recompute(main: number | null): void {
     this.main = main;
-    this.rates.clear();
     this.complexes.clear();
     this.complexOf.clear();
     this.isolated.clear();
@@ -248,25 +246,20 @@ export class Bases {
     for (const [k, m] of this.econ.owned) {
       if (!m.disabled) continue;
       this.disabled.add(k);
-      this.rates.set(k, 0);
     }
     this.buildComplexes();
     if (main !== null) this.link(main);
 
-    const mult = this.levelMult();
     let total = 0;
     for (const c of this.complexes.values()) {
-      c.rate = 0;
-      for (const k of c.members) {
-        const m = this.econ.owned.get(k);
-        if (!m) continue;
-        const r = c.isolated ? 0 : m.income * mult * c.bonus;
-        this.rates.set(k, r);
-        c.rate += r;
-        total += r;
-      }
+      c.weight = 0;
+      if (c.isolated) continue;
+      for (const k of c.members) if (k !== main) c.weight += c.bonus;
+      total += c.weight;
     }
-    this.econ.incomeRate = total;
+    this.weight = total;
+    this.econ.baseMult = 1 + this.econ.cfg.multPerBase * total;
+    this.econ.capacity = this.capacity();
 
     // A grand complex none of whose members was in one before has just formed.
     this.formed = [];
@@ -319,7 +312,7 @@ export class Bases {
       }
       members.sort((a, b) => a - b);
       const bonus = this.grandBonus(members.length);
-      this.complexes.set(hub, { hub, members, isolated: main === null, grand: bonus > 1, bonus, parent: null, exit: hub, entry: hub, path: [hub], rate: 0 });
+      this.complexes.set(hub, { hub, members, isolated: main === null, grand: bonus > 1, bonus, parent: null, exit: hub, entry: hub, path: [hub], weight: 0 });
       for (const k of members) this.complexOf.set(k, hub);
     }
     if (main === null) for (const k of this.complexOf.keys()) this.isolated.add(k);
@@ -428,22 +421,13 @@ export class Bases {
   }
 
   /**
-   * One turn passed (a tile-changing player action): every linked base's production is
-   * credited at once, and each producing complex sends a shipment towards the
-   * main base for the picture. Uses the rates of the last `recompute`; a base
-   * disabled since then pays nothing.
+   * One turn passed (a tile-changing player action): each linked complex
+   * sends a shipment towards the main base, for the picture only. Uses the
+   * network of the last `recompute`.
    */
   turn(): void {
     const main = this.main;
-    let total = 0;
-    for (const [k, m] of this.econ.owned) {
-      const gain = m.disabled ? 0 : (this.rates.get(k) ?? 0);
-      if (gain <= 0) continue;
-      m.produced = (m.produced ?? 0) + gain;
-      total += gain;
-    }
-    if (total > 0) this.deliver(total);
-    for (const c of this.complexes.values()) if (c.hub !== main && c.rate > 0) this.ship(c.hub);
+    for (const c of this.complexes.values()) if (c.hub !== main && c.weight > 0) this.ship(c.hub);
   }
 
   /** Move the shipments (animation only). */
@@ -477,10 +461,6 @@ export class Bases {
     this.lastOut.set(hub, s);
   }
 
-  private deliver(amount: number): void {
-    this.econ.credits += amount;
-    this.econ.lifetime.earned += amount;
-  }
 
   info(key: number): BaseInfo | null {
     const main = key === this.main;
@@ -501,12 +481,10 @@ export class Bases {
       children,
       route: disabled ? 0 : this.route(key),
       hops: disabled ? 0 : this.routePaths(key).length,
-      rate: main ? 0 : (this.rates.get(key) ?? 0),
-      produced: main ? 0 : (m!.produced ?? 0),
+      multShare: main || disabled || !c || c.isolated ? 0 : this.econ.cfg.multPerBase * c.bonus,
       isolated: c?.isolated ?? false,
       disabled,
       complexSize: c?.members.length ?? 1,
-      complexRate: c?.rate ?? 0,
       complexBonus: c?.bonus ?? 1,
     };
   }
@@ -523,7 +501,11 @@ export class Bases {
   /** Call after `econ.restore`: undelivered goods of older saves are credited at once. Grand complexes existing at load do not count as newly formed. */
   restore(s: BasesSnapshot | undefined): void {
     this.mainLevel = s?.mainLevel ?? 1;
+    this.econ.capacity = this.capacity();
     this.primed = false;
-    if (s?.inTransit) this.deliver(s.inTransit);
+    if (s?.inTransit) {
+      this.econ.credits += s.inTransit;
+      this.econ.lifetime.earned += s.inTransit;
+    }
   }
 }

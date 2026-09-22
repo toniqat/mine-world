@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CellState, Econ, Game, isRevealed, makeConfig, upgradeDef } from '../src';
+import { CellState, Game, isRevealed, makeConfig, upgradeDef } from '../src';
 
 const RADII = [6, 12];
 
@@ -7,6 +7,7 @@ function tierGame(seed = 1): Game {
   const g = new Game({
     seed,
     fog: { enabled: false },
+    econ: { storageBase: Infinity },
     tiers: { radii: RADII },
     world: { uniformDensity: 0.12, terrainEnabled: false },
     play: { cascadeRadius: 40, cascadeCap: 100000 },
@@ -91,35 +92,20 @@ describe('mining tiers (T-TIER)', () => {
     expect(h.upgrades.level('streak_cap')).toBe(2);
   });
 
-  it('higher tiers are worth more and blast wider', () => {
+  it('higher tiers blast wider', () => {
     const g = tierGame();
-    const mult = g.cfg.tiers.valueMult;
-    const d = (x: number) => g.econ.mineValue(g.world.density(x, 0));
-    expect(g.mineValueAt(3, 0)).toBeCloseTo(d(3) * mult[0]);
-    expect(g.mineValueAt(8, 0)).toBeCloseTo(d(8) * mult[1]);
-    expect(g.mineValueAt(30, 0)).toBeCloseTo(d(30) * mult[2]);
     const b = g.cfg.blast.radiusByTier;
     expect([g.blastRangeAt(3, 0), g.blastRangeAt(8, 0), g.blastRangeAt(30, 0)].map((r) => [r.min, r.max])).toEqual([b[0], b[1], b[2]]);
   });
 
-  it('every default tier has a mining level, a value multiplier and a blast range', () => {
+  it('every default tier has a mining level and a blast range', () => {
     const cfg = makeConfig({} as never);
     const tiers = cfg.tiers.radii.length + 1;
-    expect(cfg.tiers.valueMult).toHaveLength(tiers);
     expect(cfg.blast.radiusByTier).toHaveLength(tiers);
     expect(upgradeDef('mining').maxLevel).toBe(tiers - 1);
     expect(upgradeDef('mining').costs).toHaveLength(tiers - 1);
   });
 
-  it('settlement pays and produces with the tier multiplier', () => {
-    const cfg = makeConfig({} as never);
-    const a = new Econ(cfg.econ, cfg.world.densityMin);
-    const b = new Econ(cfg.econ, cfg.world.densityMin);
-    const ra = a.onSettlement([{ key: 1, density: 0.2 }], 0);
-    const rb = b.onSettlement([{ key: 1, density: 0.2, mult: 4 }], 0);
-    expect(rb.payout).toBeCloseTo(ra.payout * 4);
-    expect(rb.income).toBeCloseTo(ra.income * 4);
-  });
 });
 
 describe('start-relative map', () => {

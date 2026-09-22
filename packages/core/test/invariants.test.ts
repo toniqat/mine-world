@@ -21,7 +21,7 @@ import {
 } from '../src';
 
 function uniformGame(density: number, seed = 1, mode: 'STRICT' | 'FAIR' | 'FORGIVING' = 'FAIR'): Game {
-  return new Game({ seed, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: density, terrainEnabled: false }, resolve: { interventionMode: mode } } as never);
+  return new Game({ seed, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: density, terrainEnabled: false }, econ: { storageBase: Infinity }, resolve: { interventionMode: mode } } as never);
 }
 
 /** Every revealed number must equal the count of true mines around it. */
@@ -299,7 +299,7 @@ describe('consistency invariant (T-SETTLE generalised)', () => {
 
 describe('T-SEAL: active constraints scale with perimeter, not area', () => {
   it('a fully opened disc has zero active constraints inside', () => {
-    const g = new Game({ seed: 9, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: 0, startSafeRadius: 3, terrainEnabled: false }, play: { cascadeRadius: 12, cascadeCap: 100000 } } as never);
+    const g = new Game({ seed: 9, fog: { enabled: false }, tiers: { enabled: false }, world: { uniformDensity: 0, startSafeRadius: 3, terrainEnabled: false }, econ: { storageBase: Infinity }, play: { cascadeRadius: 12, cascadeCap: 100000 } } as never);
     g.reveal(0, 0);
     const revealed = g.board.revealedCount;
     expect(revealed).toBeGreaterThan(400);

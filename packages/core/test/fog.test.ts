@@ -4,7 +4,7 @@ import { CellState, Game, cellKey, isRevealed, makeConfig } from '../src';
 const FOG = makeConfig({} as never).fog;
 
 function fogGame(seed = 1, density = 0.15): Game {
-  return new Game({ seed, tiers: { enabled: false }, world: { uniformDensity: density, terrainEnabled: false }, resolve: { interventionMode: 'FAIR' } } as never);
+  return new Game({ seed, tiers: { enabled: false }, world: { uniformDensity: density, terrainEnabled: false }, econ: { storageBase: Infinity }, resolve: { interventionMode: 'FAIR' } } as never);
 }
 
 /** Make (x, y) an Owned base directly (bypassing settlement). */

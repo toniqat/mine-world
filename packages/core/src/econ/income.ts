@@ -1,21 +1,25 @@
 import type { EconConfig } from '../config';
 
 /**
- * Economy state (spec §9). Settlement is the only moment money is created
- * from flags; nothing here reacts to placing or removing a flag (INV-2).
+ * Economy state (spec §9, reworked 2026-09-22). Settlement is still the only
+ * moment money comes from flags; nothing here reacts to placing or removing a
+ * flag (INV-2).
  *
- * Sapper-style push-your-luck layer (user decision): settlement payouts land
- * in `unbanked` and grow with the click streak; stepping on a mine or having a
- * wrong flag settled burns a fraction of `unbanked`. `cashOut()` banks it.
- * Passive income from bases is credited by `Bases.turn` every tile-changing player action.
- * `incomeRate` (credits per turn) is written by `Bases.recompute()`.
+ * Points (user decision 2026-09-22): every opened cell earns `tilePoints` and
+ * every base a settlement creates earns `basePoints`, x the point multiplier
+ * (`baseMult` from the active bases x the streak x prestige). Points land in
+ * `unbanked`, which holds at most `capacity` (the main-base level raises it);
+ * a full pool blocks openings until `cashOut()` banks it into `credits`.
+ * Stepping on a mine or having a wrong flag settled burns a fraction of
+ * `unbanked` (Sapper-style). Bases no longer produce anything by themselves.
+ * `baseMult` and `capacity` are written by `Bases.recompute()`.
  */
 export interface OwnedMine {
-  /** Base income per turn, before the main-base level multiplier (see Bases). */
-  income: number;
-  /** Credits this base has produced (absent in older saves). */
+  /** Per-turn production of the retired economy (older saves only). */
+  income?: number;
+  /** Credits this base produced under the retired economy (older saves only). */
   produced?: number;
-  /** Knocked out by a mine explosion: produces nothing and is not a base until repaired. */
+  /** Knocked out by a mine explosion: not a base until repaired. */
   disabled?: boolean;
   /** densityMultiplier at the time of settlement (prestige input). */
   dm: number;
@@ -40,7 +44,6 @@ export interface EconSnapshot {
   credits: number;
   unbanked: number;
   streak: number;
-  incomeRate: number;
   cores: number;
   owned: [number, OwnedMine][];
   lifetime: Lifetime;
@@ -67,8 +70,11 @@ export class Econ {
   credits = 0;
   unbanked = 0;
   streak = 0;
-  incomeRate = 0;
   cores = 0;
+  /** Point multiplier from the active bases (1 + multPerBase x their weight). */
+  baseMult = 1;
+  /** Most the unbanked pool holds (storageBase x storageGrowth^(main-base level - 1)). */
+  capacity = Infinity;
   /** Added to `streakMultCap` (the `streak_cap` upgrade). */
   streakCapBonus = 0;
   readonly owned = new Map<number, OwnedMine>();
@@ -88,12 +94,27 @@ export class Econ {
     return Math.pow(2, (Math.max(d, this.densityMin) - this.densityMin) / this.cfg.densityDoubling);
   }
 
-  mineValue(d: number): number {
-    return this.cfg.baseValue * this.densityMultiplier(d) * this.prestigeMult();
-  }
-
   streakMult(): number {
     return Math.min(this.cfg.streakMultCap + this.streakCapBonus, 1 + this.streak * this.cfg.streakMultPerClick);
+  }
+
+  /** Everything a point is multiplied by: bases x streak x prestige. */
+  pointMult(): number {
+    return this.baseMult * this.streakMult() * this.prestigeMult();
+  }
+
+  /** The unbanked pool is full: nothing more can be opened until Cash Out. */
+  full(): boolean {
+    return this.unbanked >= this.capacity;
+  }
+
+  /** Add `points` x the point multiplier to the unbanked pool, up to its capacity. Returns what was added. */
+  gain(points: number): number {
+    if (points <= 0) return 0;
+    const add = Math.min(points * this.pointMult(), Math.max(0, this.capacity - this.unbanked));
+    this.unbanked += add;
+    if (this.unbanked > this.lifetime.bestUnbanked) this.lifetime.bestUnbanked = this.unbanked;
+    return add;
   }
 
   onSafeClick(): void {
@@ -124,27 +145,17 @@ export class Econ {
   }
 
   /**
-   * Settle a closed component. `mines` are the correct flags: key, density and
-   * the value multiplier of their mining tier (1 when absent).
-   * Returns payout, income added, and money lost to wrong flags.
+   * Settle a claim batch. `mines` are the correct flags (they become bases,
+   * `basePoints` each); `wrong` flags burn part of the pool.
+   * Returns the points paid and the money lost to wrong flags.
    */
-  onSettlement(mines: Array<{ key: number; density: number; mult?: number }>, wrong: number): { payout: number; income: number; loss: number } {
-    let payout = 0;
-    let income = 0;
-    const sm = this.streakMult();
-    for (const m of mines) {
-      const v = this.mineValue(m.density) * (m.mult ?? 1);
-      payout += v * this.cfg.settlementPayoutMult * sm;
-      const inc = v * this.cfg.incomePerTurnMult;
-      income += inc;
-      this.owned.set(m.key, { income: inc, dm: this.densityMultiplier(m.density), produced: 0 });
-    }
-    this.unbanked += payout;
+  onSettlement(mines: Array<{ key: number; density: number }>, wrong: number): { payout: number; loss: number } {
+    for (const m of mines) this.owned.set(m.key, { dm: this.densityMultiplier(m.density) });
+    const payout = this.gain(mines.length * this.cfg.basePoints);
     this.lifetime.settlements++;
     this.lifetime.minesOwned += mines.length;
-    if (this.unbanked > this.lifetime.bestUnbanked) this.lifetime.bestUnbanked = this.unbanked;
     const loss = this.onWrongFlags(wrong);
-    return { payout, income, loss };
+    return { payout, loss };
   }
 
   cashOut(): number {
@@ -179,7 +190,6 @@ export class Econ {
       credits: this.credits,
       unbanked: this.unbanked,
       streak: this.streak,
-      incomeRate: this.incomeRate,
       cores: this.cores,
       owned: [...this.owned.entries()].map(([k, v]) => [k, { ...v }] as [number, OwnedMine]),
       lifetime: { ...this.lifetime },
@@ -190,7 +200,6 @@ export class Econ {
     this.credits = s.credits;
     this.unbanked = s.unbanked;
     this.streak = s.streak;
-    this.incomeRate = s.incomeRate;
     this.cores = s.cores;
     this.owned.clear();
     for (const [k, v] of s.owned) this.owned.set(k, { ...v });
