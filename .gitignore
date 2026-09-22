@@ -30,3 +30,6 @@ desktop.ini
 # Screenshots (manual and electron --screenshot output)
 /*.png
 packages/electron/*.png
+
+# Multiplayer server saves
+packages/server/data/

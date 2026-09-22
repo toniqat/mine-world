@@ -8,10 +8,12 @@
   ],
   "scripts": {
     "dev": "npm -w @mine/web run dev",
+    "server": "npm -w @mine/server run start",
+    "server:dev": "npm -w @mine/server run dev",
     "build": "npm -w @mine/web run build",
     "preview": "npm -w @mine/web run preview",
     "test": "npm -w @mine/core run test",
-    "typecheck": "npm -w @mine/core run typecheck && npm -w @mine/web run typecheck && npm -w @mine/sim run typecheck",
+    "typecheck": "npm -w @mine/core run typecheck && npm -w @mine/web run typecheck && npm -w @mine/sim run typecheck && npm -w @mine/server run typecheck",
     "sim": "npm -w @mine/sim run sim",
     "electron:dev": "npm -w @mine/electron run dev"
   },

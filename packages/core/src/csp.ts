@@ -1,5 +1,5 @@
 import { Board, CellState, isKnownMine, isRevealed, isWall, numberOf } from './board';
-import { cellKey, forEachNeighbor, keyX, keyY } from './key';
+import { cellKey, deltaX, forEachNeighbor, keyX, keyY, wrapX } from './key';
 import type { World } from './world';
 
 /**
@@ -59,7 +59,7 @@ export function classify(ctx: CspContext, mode: Mode, x: number, y: number): 0 |
   if (isKnownMine(s)) return 1;
   if (s === CellState.Flag && mode === 'belief') return 1;
   if (mode === 'engine') {
-    const c = ctx.world.committed(cellKey(x, y));
+    const c = ctx.world.committed(cellKey(wrapX(x, ctx.world.wrap), y));
     if (c === 1) return 1;
     if (c === 0) return 2;
   }
@@ -72,13 +72,18 @@ export function constraintFor(ctx: CspContext, mode: Mode, x: number, y: number)
   if (!isRevealed(s)) return null;
   let n = numberOf(s);
   const cells: number[] = [];
-  forEachNeighbor(x, y, (nx, ny) => {
-    const cl = classify(ctx, mode, nx, ny);
-    if (cl === 0) cells.push(cellKey(nx, ny));
-    else if (cl === 1) n--;
-  });
+  forEachNeighbor(
+    x,
+    y,
+    (nx, ny) => {
+      const cl = classify(ctx, mode, nx, ny);
+      if (cl === 0) cells.push(cellKey(nx, ny));
+      else if (cl === 1) n--;
+    },
+    ctx.world.wrap,
+  );
   if (cells.length === 0) return null;
-  return { cells, n, src: cellKey(x, y) };
+  return { cells, n, src: cellKey(wrapX(x, ctx.world.wrap), y) };
 }
 
 export function scannerConstraintFor(ctx: CspContext, mode: Mode, sc: ScannerInfo): Constraint | null {
@@ -87,7 +92,7 @@ export function scannerConstraintFor(ctx: CspContext, mode: Mode, sc: ScannerInf
   for (let y = sc.cy - sc.r; y <= sc.cy + sc.r; y++) {
     for (let x = sc.cx - sc.r; x <= sc.cx + sc.r; x++) {
       const cl = classify(ctx, mode, x, y);
-      if (cl === 0) cells.push(cellKey(x, y));
+      if (cl === 0) cells.push(cellKey(wrapX(x, ctx.world.wrap), y));
       else if (cl === 1) n--;
     }
   }
@@ -98,7 +103,7 @@ export function scannerConstraintFor(ctx: CspContext, mode: Mode, sc: ScannerInf
 function scannersCovering(ctx: CspContext, x: number, y: number): ScannerInfo[] {
   const out: ScannerInfo[] = [];
   for (const sc of ctx.scanners) {
-    if (Math.abs(x - sc.cx) <= sc.r && Math.abs(y - sc.cy) <= sc.r) out.push(sc);
+    if (Math.abs(deltaX(x, sc.cx, ctx.world.wrap)) <= sc.r && Math.abs(y - sc.cy) <= sc.r) out.push(sc);
   }
   return out;
 }
@@ -154,15 +159,20 @@ export function collectComponent(
     const k = queue.pop()!;
     const x = keyX(k);
     const y = keyY(k);
-    forEachNeighbor(x, y, (nx, ny) => {
-      const ns = ctx.board.get(nx, ny);
-      if (!isRevealed(ns)) return;
-      const nk = cellKey(nx, ny);
-      if (sources.has(nk)) return;
-      const c = constraintFor(ctx, mode, nx, ny);
-      if (c) addConstraint(c);
-      else sources.add(nk);
-    });
+    forEachNeighbor(
+      x,
+      y,
+      (nx, ny) => {
+        const ns = ctx.board.get(nx, ny);
+        if (!isRevealed(ns)) return;
+        const nk = cellKey(nx, ny);
+        if (sources.has(nk)) return;
+        const c = constraintFor(ctx, mode, nx, ny);
+        if (c) addConstraint(c);
+        else sources.add(nk);
+      },
+      ctx.world.wrap,
+    );
     if (includeScanners && ctx.scanners.length) {
       for (const sc of scannersCovering(ctx, x, y)) {
         const src = -(sc.id + 1);

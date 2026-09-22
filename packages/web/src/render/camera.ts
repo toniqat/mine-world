@@ -7,8 +7,15 @@ export class Camera {
   zoom = 1;
   width = 1;
   height = 1;
-  readonly minZoom = 0.2;
+  minZoom = 0.2;
   readonly maxZoom = 3;
+  /**
+   * Earth mode: the world repeats every `wrap` cells east-west and is `rows`
+   * cells tall. `constrain()` keeps the camera over the canonical copy
+   * (0 <= x < wrap cells) and the map; 0 for the endless world.
+   */
+  wrap = 0;
+  rows = 0;
 
   resize(w: number, h: number): void {
     this.width = w;
@@ -40,6 +47,27 @@ export class Camera {
   panBy(dx: number, dy: number): void {
     this.x -= dx / this.zoom;
     this.y -= dy / this.zoom;
+  }
+
+  /**
+   * Earth mode, once per frame: wrap x into the canonical copy (the renderer
+   * draws the copy next to it where the view crosses the seam) and keep the
+   * map between the top and bottom of the screen (centred when it fits).
+   */
+  constrain(): void {
+    if (!this.wrap) return;
+    const w = this.wrap * CELL;
+    this.x = ((this.x % w) + w) % w;
+    const h = this.rows * CELL;
+    const half = this.height / 2 / this.zoom;
+    this.y = 2 * half >= h ? h / 2 : Math.min(h - half, Math.max(half, this.y));
+  }
+
+  /** The copy of column `x` nearest the view (differs from `x` only on a wrapping world). */
+  nearCellX(x: number): number {
+    if (!this.wrap) return x;
+    const c = this.x / CELL;
+    return x + Math.round((c - x) / this.wrap) * this.wrap;
   }
 
   centerOnCell(cx: number, cy: number): void {

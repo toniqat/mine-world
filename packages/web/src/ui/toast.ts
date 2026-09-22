@@ -55,3 +55,27 @@ export function confirmDialog(root: HTMLElement, message: string, yes: string, n
     };
   });
 }
+
+/** A dialog with one button (game over): the backdrop does not close it. */
+export function messageDialog(root: HTMLElement, title: string, lines: Array<{ text: string; big?: boolean; small?: boolean }>, button: string): Promise<void> {
+  return new Promise((resolve) => {
+    const close = () => {
+      root.classList.remove('show');
+      resolve();
+      setTimeout(() => {
+        if (root.classList.contains('show')) return;
+        root.hidden = true;
+        root.replaceChildren();
+      }, MODAL_MS);
+    };
+    const ok = el('button', { class: 'btn primary', text: button, onclick: close });
+    root.replaceChildren(
+      el('div', { class: 'box' }, el('h3', { text: title }), ...lines.map((l) => el('p', { class: l.big ? 'big' : l.small ? 'small' : '', text: l.text })), el('div', { class: 'buttons' }, ok)),
+    );
+    root.hidden = false;
+    void root.offsetWidth;
+    root.classList.add('show');
+    root.onclick = null;
+    requestAnimationFrame(() => ok.focus());
+  });
+}

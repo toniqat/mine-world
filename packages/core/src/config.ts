@@ -6,6 +6,8 @@
  * re-tuned later. Nothing in core hard-codes a number that lives here.
  */
 
+import type { MapId } from './maps/maps';
+
 export type InterventionMode = 'STRICT' | 'FAIR' | 'FORGIVING';
 
 export interface WorldConfig {
@@ -49,6 +51,14 @@ export interface WorldConfig {
    * "start"). Absent (false) in saves from before, which keep absolute maps.
    */
   startRelative?: boolean;
+  /**
+   * Earth mode: the world is read from a fixed land mask (maps/maps.ts). Water
+   * and everything beyond the map's top and bottom rows is a wall (no
+   * procedural terrain), the map wraps east-west, and coordinates are absolute
+   * (never start-relative), so the first click picks where on the map to start.
+   * Absent / null: the endless procedural world.
+   */
+  map?: MapId | null;
   /** When set, every cell (outside the start radius) has this density. Used by sim/tests. */
   uniformDensity: number | null;
   /** Max relative density boost used to repay density debt (§5.3). */

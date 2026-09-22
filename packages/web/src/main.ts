@@ -2,8 +2,7 @@ import { App } from './app';
 import { loadSave } from './storage';
 
 async function boot(): Promise<void> {
-  const saved = await loadSave();
-  const app = new App(saved);
+  const app = new App(await loadSave('main'));
   await app.start();
   (window as unknown as { mineWorld: App }).mineWorld = app;
 }

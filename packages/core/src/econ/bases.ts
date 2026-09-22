@@ -1,7 +1,7 @@
 import { CellState, isRevealed, numberOf } from '../board';
 import type { BaseConfig } from '../config';
 import { hash01 } from '../hash';
-import { cellKey, keyX, keyY } from '../key';
+import { cellKey, deltaX, keyX, keyY, wrapX } from '../key';
 import type { Econ } from './income';
 
 /**
@@ -127,18 +127,23 @@ const JOIN_TILES = 1;
 /** Complex members may be this many tiles apart (Chebyshev). */
 const COMPLEX_REACH = 2;
 
-export function manhattan(a: number, b: number): number {
-  return Math.abs(keyX(a) - keyX(b)) + Math.abs(keyY(a) - keyY(b));
+/** Manhattan distance between two cells; across the seam on a world wrapping every `w` columns. */
+export function manhattan(a: number, b: number, w = 0): number {
+  return Math.abs(deltaX(keyX(a), keyX(b), w)) + Math.abs(keyY(a) - keyY(b));
 }
 
-/** Cell-centre point `s` tiles along a path of 4-neighbour steps (fractional between cells). */
-export function pathAt(path: number[], s: number): { x: number; y: number } {
+/**
+ * Cell-centre point `s` tiles along a path of 4-neighbour steps (fractional
+ * between cells). On a wrapping world (`w`) a step across the seam stays one
+ * step: x may then leave [0, w) (it continues from the path's previous cell).
+ */
+export function pathAt(path: number[], s: number, w = 0): { x: number; y: number } {
   const n = path.length - 1;
   const t = Math.max(0, Math.min(n, s));
   const i = Math.min(Math.max(0, n - 1), Math.floor(t));
   const j = Math.min(n, i + 1);
   const f = t - i;
-  return { x: keyX(path[i]) + (keyX(path[j]) - keyX(path[i])) * f, y: keyY(path[i]) + (keyY(path[j]) - keyY(path[i])) * f };
+  return { x: keyX(path[i]) + deltaX(keyX(path[j]), keyX(path[i]), w) * f, y: keyY(path[i]) + (keyY(path[j]) - keyY(path[i])) * f };
 }
 
 export class Bases {
@@ -173,6 +178,8 @@ export class Bases {
     private econ: Econ,
     /** Board state of a cell (`CellState`). */
     private state: (x: number, y: number) => number,
+    /** Columns after which the world repeats (World.wrap); 0: no wrap. */
+    private wrap = 0,
   ) {
     this.econ.capacity = this.capacity();
   }
@@ -271,8 +278,11 @@ export class Bases {
     for (const c of this.complexes.values()) {
       if (!c.grand) continue;
       if (this.primed && !c.members.some((k) => this.grandKeys.has(k))) {
-        const xs = c.members.map(keyX), ys = c.members.map(keyY);
-        this.formed.push({ hub: c.hub, members: c.members, cx: (Math.min(...xs) + Math.max(...xs) + 1) / 2, cy: (Math.min(...ys) + Math.max(...ys) + 1) / 2, bonus: c.bonus });
+        // Unwrapped from the first member, so a complex across the seam gets its real centre.
+        const x0 = keyX(c.members[0]);
+        const xs = c.members.map((k) => x0 + deltaX(keyX(k), x0, this.wrap)), ys = c.members.map(keyY);
+        const cx = (Math.min(...xs) + Math.max(...xs) + 1) / 2;
+        this.formed.push({ hub: c.hub, members: c.members, cx: this.wrap ? wrapX(cx, this.wrap) : cx, cy: (Math.min(...ys) + Math.max(...ys) + 1) / 2, bonus: c.bonus });
       }
       for (const k of c.members) grand.add(k);
     }
@@ -297,7 +307,7 @@ export class Bases {
         const x = keyX(members[i]), y = keyY(members[i]);
         for (let dy = -COMPLEX_REACH; dy <= COMPLEX_REACH; dy++) {
           for (let dx = -COMPLEX_REACH; dx <= COMPLEX_REACH; dx++) {
-            const n = cellKey(x + dx, y + dy);
+            const n = cellKey(wrapX(x + dx, this.wrap), y + dy);
             if (settled.has(n) && !seen.has(n)) {
               seen.add(n);
               members.push(n);
@@ -308,7 +318,7 @@ export class Bases {
       let hub = members[0];
       if (main !== null) {
         for (const k of members) {
-          const dk = manhattan(k, main), dh = manhattan(hub, main);
+          const dk = manhattan(k, main, this.wrap), dh = manhattan(hub, main, this.wrap);
           if (dk < dh || (dk === dh && k < hub)) hub = k;
         }
       } else {
@@ -353,7 +363,7 @@ export class Bases {
    * walked back from the entry, keeping its direction where it can.
    */
   private findParent(c: Complex, main: number): void {
-    const dc = manhattan(c.hub, main);
+    const dc = manhattan(c.hub, main, this.wrap);
     const dist = new Map<number, number>();
     let layer: number[] = [];
     for (const k of c.members) {
@@ -367,11 +377,11 @@ export class Bases {
       for (const k of layer) {
         const hub = this.complexOf.get(k);
         if (hub !== undefined && hub !== c.hub) {
-          const h = manhattan(hub, main);
+          const h = manhattan(hub, main, this.wrap);
           if (h < dc && (h < bestH || (h === bestH && k < entry))) ((entry = k), (bestH = h));
         }
         const x = keyX(k), y = keyY(k);
-        for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
+        for (const [nx, ny] of [[wrapX(x + 1, this.wrap), y], [wrapX(x - 1, this.wrap), y], [x, y + 1], [x, y - 1]]) {
           const n = cellKey(nx, ny);
           if (dist.has(n) || !this.passable(nx, ny)) continue;
           dist.set(n, d + 1);
@@ -388,7 +398,7 @@ export class Bases {
       const x = keyX(k), y = keyY(k);
       for (const [ex, ey] of [[dx, dy], [0, 1], [0, -1], [1, 0], [-1, 0]]) {
         if (!ex && !ey) continue;
-        const n = cellKey(x + ex, y + ey);
+        const n = cellKey(wrapX(x + ex, this.wrap), y + ey);
         if (dist.get(n) !== d - 1) continue;
         k = n;
         dx = ex;

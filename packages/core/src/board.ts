@@ -1,4 +1,4 @@
-import { cellKey } from './key';
+import { cellKey, wrapX } from './key';
 
 /** Player-visible cell states, stored one byte per cell in 16x16 chunks. */
 export const CellState = {
@@ -45,14 +45,18 @@ export class Board {
   private touched = false;
   /** Terrain lookup (World.terrain): the state of a cell nothing was stored in. */
   terrain: ((x: number, y: number) => number) | null = null;
+  /** Columns after which the world repeats (World.wrap); 0: no wrap. Any x is accepted and stored canonically. */
+  wrap = 0;
 
   get(x: number, y: number): number {
+    if (this.wrap) x = wrapX(x, this.wrap);
     const c = this.chunks.get(cellKey(x >> 4, y >> 4));
     const s = c ? c[((y & 15) << 4) | (x & 15)] : 0;
     return s === 0 && this.terrain ? this.terrain(x, y) : s;
   }
 
   set(x: number, y: number, s: number): void {
+    if (this.wrap) x = wrapX(x, this.wrap);
     const ck = cellKey(x >> 4, y >> 4);
     let c = this.chunks.get(ck);
     if (!c) {
@@ -79,8 +83,21 @@ export class Board {
     }
   }
 
-  /** Visit every non-zero cell inside the rect (inclusive), touching only existing chunks. */
+  /**
+   * Visit every non-zero cell inside the rect (inclusive), touching only existing
+   * chunks. On a wrapping board the rect may cross the seam; cells are reported
+   * with canonical coordinates, each once.
+   */
   forEachInRect(x0: number, y0: number, x1: number, y1: number, fn: (x: number, y: number, s: number) => void): void {
+    const w = this.wrap;
+    if (w && (x0 < 0 || x1 >= w)) {
+      if (x1 - x0 + 1 >= w) return this.forEachInRect(0, y0, w - 1, y1, fn);
+      const a = wrapX(x0, w);
+      const b = wrapX(x1, w);
+      if (a <= b) return this.forEachInRect(a, y0, b, y1, fn);
+      this.forEachInRect(a, y0, w - 1, y1, fn);
+      return this.forEachInRect(0, y0, b, y1, fn);
+    }
     for (let cy = y0 >> 4; cy <= y1 >> 4; cy++) {
       for (let cx = x0 >> 4; cx <= x1 >> 4; cx++) {
         const c = this.chunks.get(cellKey(cx, cy));
@@ -115,6 +132,7 @@ export class Board {
     b.maxY = this.maxY;
     b.touched = this.touched;
     b.terrain = this.terrain;
+    b.wrap = this.wrap;
     return b;
   }
 

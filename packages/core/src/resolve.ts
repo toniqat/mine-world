@@ -135,6 +135,7 @@ export function resolveReveal(d: ResolveDeps, x: number, y: number, rescue = tru
 export function fairShouldIntervene(d: ResolveDeps, x: number, y: number): boolean {
   const { board, world } = d.ctx;
   const cap = d.cfg.resolve.escapeCap;
+  const w = world.wrap;
   const visited = new Set<number>();
   const queue: number[] = [];
   let walled = false;
@@ -144,22 +145,32 @@ export function fairShouldIntervene(d: ResolveDeps, x: number, y: number): boole
     if (isRevealed(s) || isKnownMine(s) || isWall(s)) return false;
     return world.truth(px, py) === 0;
   };
-  forEachNeighbor(x, y, (nx, ny) => {
-    const k = cellKey(nx, ny);
-    if (!visited.has(k) && passable(nx, ny)) {
-      visited.add(k);
-      queue.push(k);
-    }
-  });
+  forEachNeighbor(
+    x,
+    y,
+    (nx, ny) => {
+      const k = cellKey(nx, ny);
+      if (!visited.has(k) && passable(nx, ny)) {
+        visited.add(k);
+        queue.push(k);
+      }
+    },
+    w,
+  );
   while (queue.length) {
     if (walled || visited.size >= cap) return false;
     const k = queue.pop()!;
-    forEachNeighbor(keyX(k), keyY(k), (nx, ny) => {
-      const nk = cellKey(nx, ny);
-      if (visited.has(nk) || !passable(nx, ny)) return;
-      visited.add(nk);
-      queue.push(nk);
-    });
+    forEachNeighbor(
+      keyX(k),
+      keyY(k),
+      (nx, ny) => {
+        const nk = cellKey(nx, ny);
+        if (visited.has(nk) || !passable(nx, ny)) return;
+        visited.add(nk);
+        queue.push(nk);
+      },
+      w,
+    );
   }
   return !walled;
 }

@@ -27,15 +27,21 @@ export interface CellTextures {
   water: Texture;
   /** Fog of war: a faint tile with a dashed outline; hides whether a wall lies under it. */
   fog: Texture;
+  /** Earth mode: fogged water, a faint full-bleed wash, so the coastline shows through the fog. */
+  fogWater: Texture;
   /** A tile in a mining tier whose technology is not learned yet: its own colour and a padlock. */
   locked: Texture;
   digits: Texture[]; // index 1..8
   /** Digits in the error colour: more flags and known mines around the number than it says. */
   digitsOver: Texture[]; // index 1..8
   empty: Texture;
+  /** Online: tiles per signature colour (`buildOwnerTextures`), indexed by colour. */
+  owners?: OwnerTextures[];
 }
 
 const RES = 2;
+/** Opacity of fogged water over the background (the coastline under the fog). */
+export const FOG_WATER_ALPHA = 0.45;
 /** Radius of the base (Owned mine) dot. */
 const BASE_R = 4;
 
@@ -108,6 +114,7 @@ export function buildTextures(renderer: Renderer, p: Palette): CellTextures {
     dashedRect(g, 1.5, 1.5, CELL - 3, CELL - 3);
     g.stroke({ width: 1, color: p.cellFog, alpha: 0.55 });
   });
+  const fogWater = gen(renderer, (g) => g.rect(0, 0, CELL, CELL).fill({ color: p.cellWater, alpha: FOG_WATER_ALPHA }));
   const drawLock = (g: Graphics) => {
     g.roundRect(c - 4, c - 1, 8, 6, 1).fill({ color: p.fgMuted, alpha: 0.55 });
     g.arc(c, c - 1, 2.75, Math.PI, 0).stroke({ width: 1.5, color: p.fgMuted, alpha: 0.55 });
@@ -154,7 +161,7 @@ export function buildTextures(renderer: Renderer, p: Palette): CellTextures {
   };
   const digits = digitSet(p.digit);
   const digitsOver = digitSet(p.error);
-  return { unknown, unknownHover, question, questionHover, revealed, flag, flagGlyph, owned, ownedIsolated, ownedDisabled, lost, exploded, mountain, water, fog, locked, digits, digitsOver, empty };
+  return { unknown, unknownHover, question, questionHover, revealed, flag, flagGlyph, owned, ownedIsolated, ownedDisabled, lost, exploded, mountain, water, fog, fogWater, locked, digits, digitsOver, empty };
 }
 
 /** Outline of a rect as dashes (call `stroke` afterwards). */
@@ -172,8 +179,59 @@ function dashedRect(g: Graphics, x: number, y: number, w: number, h: number, das
 }
 
 export function destroyTextures(t: CellTextures): void {
+  if (t.owners) destroyOwnerTextures(t.owners);
   // digits[0] is `empty`; destroy it once.
-  for (const tex of [t.unknown, t.unknownHover, t.question, t.questionHover, t.revealed, t.flag, t.flagGlyph, t.owned, t.ownedIsolated, t.ownedDisabled, t.lost, t.exploded, t.mountain, t.water, t.fog, t.locked, t.empty, ...t.digits.slice(1), ...t.digitsOver.slice(1)]) tex.destroy(true);
+  for (const tex of [t.unknown, t.unknownHover, t.question, t.questionHover, t.revealed, t.flag, t.flagGlyph, t.owned, t.ownedIsolated, t.ownedDisabled, t.lost, t.exploded, t.mountain, t.water, t.fog, t.fogWater, t.locked, t.empty, ...t.digits.slice(1), ...t.digitsOver.slice(1)]) tex.destroy(true);
+}
+
+/** Tiles of one player's land (online): opened cells and their bases tinted with the player's signature colour. */
+export interface OwnerTextures {
+  revealed: Texture;
+  owned: Texture;
+  lost: Texture;
+}
+
+/** How strongly an opened tile takes its owner's colour (numbers must stay readable on it). */
+const OWNER_TINT = { light: 0.2, dark: 0.26 } as const;
+
+/** Mix two 0xRRGGBB colours: t = 0 gives a, 1 gives b. */
+export function mixColor(a: number, b: number, t: number): number {
+  const ch = (s: number) => Math.round(((a >> s) & 255) + (((b >> s) & 255) - ((a >> s) & 255)) * t);
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+}
+
+/** One texture set per signature colour: the opened tile tinted, a base as a full-colour dot on it, a lost mine. */
+export function buildOwnerTextures(renderer: Renderer, p: Palette, colors: readonly number[]): OwnerTextures[] {
+  const c = CELL / 2;
+  return colors.map((color) => {
+    const fill = mixColor(p.cellRevealed, color, OWNER_TINT[p.name]);
+    const ground = (g: Graphics) => {
+      g.rect(0, 0, CELL, CELL).fill(p.cellGrid);
+      g.rect(0.5, 0.5, CELL - 1, CELL - 1).fill(fill);
+    };
+    return {
+      revealed: gen(renderer, ground),
+      owned: gen(renderer, (g) => {
+        ground(g);
+        g.circle(c, c, BASE_R + 1).fill(color);
+        g.circle(c, c, (BASE_R + 1) / 2).fill({ color: 0xffffff, alpha: 0.4 });
+      }),
+      lost: gen(renderer, (g) => {
+        ground(g);
+        g.poly([c, c - 8, c + 8, c, c, c + 8, c - 8, c]).fill(p.cellLost);
+        g.moveTo(c - 6, c - 6).lineTo(c + 6, c + 6).stroke({ width: 2, color: fill });
+      }),
+    };
+  });
+}
+
+export function destroyOwnerTextures(list: OwnerTextures[]): void {
+  for (const t of list) for (const tex of [t.revealed, t.owned, t.lost]) tex.destroy(true);
+}
+
+/** An owned cell's tile (opened, base or lost mine) in its owner's colours. */
+export function ownerTexture(t: OwnerTextures, s: number): Texture {
+  return s === CellState.Owned ? t.owned : s === CellState.Lost ? t.lost : t.revealed;
 }
 
 /** Background texture for a cell state. */

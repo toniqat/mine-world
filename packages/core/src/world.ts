@@ -1,7 +1,8 @@
 import type { WorldConfig } from './config';
 import { CellState } from './board';
 import { clamp, fbm, hash01 } from './hash';
-import { cellKey } from './key';
+import { cellKey, deltaX, wrapX } from './key';
+import { mapMask, type MapMask } from './maps/maps';
 
 /**
  * World = base layer (stateless hash) + override layer (sparse, authoritative).
@@ -31,12 +32,20 @@ export class World {
   /** Terrain per 16x16 chunk (CellState.Mountain / Water / 0), filled lazily once the start is set. */
   private readonly terrainChunks = new Map<number, Uint8Array>();
 
-  constructor(public cfg: WorldConfig, public seed: number) {}
+  /** Earth mode: the land mask the world is read from, else null. */
+  readonly map: MapMask | null;
+  /** Columns after which the world repeats (the map's width), 0 when it does not wrap. */
+  readonly wrap: number;
+
+  constructor(public cfg: WorldConfig, public seed: number) {
+    this.map = cfg.map ? mapMask(cfg.map) : null;
+    this.wrap = this.map ? this.map.w : 0;
+  }
 
   /** Move the start area onto (x, y). Ignored once any truth was observed. */
   setStart(x: number, y: number): void {
     if (this.started) return;
-    this.startX = x;
+    this.startX = wrapX(x, this.wrap);
     this.startY = y;
     this.started = true;
   }
@@ -46,16 +55,22 @@ export class World {
    * `startRelative`, so the map does not depend on where the main base went.
    */
   private nx(x: number): number {
-    return this.cfg.startRelative ? x - this.startX : x;
+    return this.cfg.startRelative && !this.map ? x - this.startX : x;
   }
   private ny(y: number): number {
-    return this.cfg.startRelative ? y - this.startY : y;
+    return this.cfg.startRelative && !this.map ? y - this.startY : y;
+  }
+
+  /** Distance from the start cell (across the wrap on a map). */
+  distFromStart(x: number, y: number): number {
+    return Math.hypot(deltaX(x, this.startX, this.wrap), y - this.startY);
   }
 
   /** Prior mine density at a cell (§3.1 / §3.3). */
   density(x: number, y: number): number {
     const w = this.cfg;
-    const r = Math.hypot(x - this.startX, y - this.startY);
+    if (this.wrap) x = wrapX(x, this.wrap);
+    const r = this.distFromStart(x, y);
     if (r < w.startSafeRadius) return 0;
     if (w.uniformDensity !== null) return w.uniformDensity;
     let n = fbm(this.seed, this.nx(x), this.ny(y), w.biomeNoiseScale, w.biomeOctaves);
@@ -73,14 +88,21 @@ export class World {
   }
 
   isMineBase(x: number, y: number): boolean {
+    if (this.wrap) x = wrapX(x, this.wrap);
     return hash01(this.seed, this.nx(x), this.ny(y)) < this.density(x, y);
   }
 
   /**
    * Terrain wall at a cell (CellState.Mountain / Water), or 0. Stateless from the
    * seed and the start cell; nothing before the start is set, nothing near it.
+   * On a map: water and every row above or below the map, always (the map is fixed).
    */
   terrain(x: number, y: number): number {
+    const m = this.map;
+    if (m) {
+      if (y < 0 || y >= m.h) return CellState.Water;
+      return m.data[y * m.w + wrapX(x, m.w)] ? 0 : CellState.Water;
+    }
     if (!this.cfg.terrainEnabled || !this.started) return 0;
     const ck = cellKey(x >> 4, y >> 4);
     let c = this.terrainChunks.get(ck);
@@ -143,6 +165,7 @@ export class World {
    */
   truth(x: number, y: number): 0 | 1 {
     this.started = true;
+    if (this.wrap) x = wrapX(x, this.wrap);
     if (this.terrain(x, y)) return 0;
     const ov = this.overrides.get(cellKey(x, y));
     if (ov !== undefined) return ov;

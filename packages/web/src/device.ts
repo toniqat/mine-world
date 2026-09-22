@@ -1,7 +1,7 @@
 /**
  * Touch devices (a coarse primary pointer: phones, tablets) play by touch
  * rules: tapping a closed tile cycles its mark instead of opening it, and
- * there is no long press or flag mode. Decided per device, not per event, so
+ * there is no flag mode. Decided per device, not per event, so
  * a mouse plugged into a tablet still follows the touch rules.
  */
 const coarse = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : null;

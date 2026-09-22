@@ -1,8 +1,9 @@
-import { Container, Graphics, Sprite, Text, type Application, type Texture } from 'pixi.js';
-import { CHUNK, CellState, cellKey, hash01, inBlast, inDisc, isKnownMine, isRevealed, keyX, keyY, numberOf, type CellChange, type DroneState, type Game, type ScannerInfo, type Shipment } from '@mine/core';
+import { Container, Graphics, Matrix, Sprite, Text, type Application, type Renderer, type Texture } from 'pixi.js';
+import { CHUNK, CellState, SIGNATURE_COLORS, cellKey, deltaX, hash01, inBlast, inDisc, isKnownMine, isRevealed, isWall, keyX, keyY, numberOf, wrapX, type CellChange, type DroneState, type Game, type ScannerInfo, type Shipment } from '@mine/core';
 import { hex, type Palette } from '../theme';
 import type { Camera } from './camera';
-import { CELL, buildTextures, destroyTextures, stateTexture, type CellTextures } from './textures';
+import { Overview } from './overview';
+import { CELL, buildOwnerTextures, buildTextures, destroyOwnerTextures, destroyTextures, ownerTexture, stateTexture, type CellTextures } from './textures';
 
 /**
  * Board renderer: one sprite per cell, grouped per 16x16 chunk, culled by the
@@ -11,7 +12,11 @@ import { CELL, buildTextures, destroyTextures, stateTexture, type CellTextures }
  * Short-lived effects (flag pop, reveal fades, number fades, drone lines,
  * settlement pulses, blasts, shipment trails) are updated every frame while active.
  */
-const DIGIT_MIN_ZOOM = 0.5;
+export const DIGIT_MIN_ZOOM = 0.5;
+/** Earth mode: below this zoom tiles are not drawn (the overview shows the map)... */
+export const TILE_MIN_ZOOM = 0.2;
+/** ...which fades in from this zoom down. */
+const OVERVIEW_ZOOM = 0.28;
 /** A finished number fades out over this long. */
 const DIGIT_FADE_MS = 300;
 /** An opened tile flips over this long (the cover folds away, then the face unfolds)... */
@@ -234,14 +239,19 @@ class ChunkView {
     const s = game.cellState(x, y);
     this.state[i] = s;
     if (game.fogged(x, y)) {
-      this.bg[i].texture = tex.fog;
+      // On a map the coastline shows through the fog; elsewhere a wall under fog looks like any fogged cell.
+      this.bg[i].texture = game.wrap && isWall(s) ? tex.fogWater : tex.fog;
       this.done[i] = 0;
       this.dim[i] = 0;
       this.digit[i].visible = false;
       return false;
     }
+    // Online: opened land and bases in their owner's colour (land nobody owns any more stays plain).
+    const owner = tex.owners && (isRevealed(s) || s === CellState.Owned || s === CellState.Lost) ? game.cellOwner(x, y) : -1;
     this.bg[i].texture =
-      s === CellState.Owned
+      owner >= 0
+        ? ownerTexture(tex.owners![owner], s)
+        : s === CellState.Owned
         ? ownedTexture(tex, baseStyle(game, cellKey(x, y)))
         : s === CellState.Unknown || s === CellState.Flag
           ? closedTexture(game, tex, x, y, s)
@@ -278,6 +288,8 @@ class ChunkView {
 
 export class BoardView {
   readonly root = new Container();
+  /** Screen-space layer above the board (the Earth overview); the app adds it to the stage. */
+  readonly screen = new Container();
   private readonly chunkLayer = new Container();
   private readonly densityLayer = new Graphics();
   /** Base network, the selected base's route and the main-base diamond. */
@@ -357,6 +369,14 @@ export class BoardView {
   /** Camera of the last frame, to tell a moving camera from a still one. */
   private lastCam = { x: NaN, y: NaN, zoom: NaN };
   private overlayDirty = true;
+  /** Columns after which the world repeats (Earth mode), 0 for the endless world. */
+  private w = 0;
+  /** Rows of the map (Earth mode): no chunks are built above or below it. */
+  private rows = 0;
+  /** Earth mode: the whole map at one texel per cell, shown zoomed out. */
+  private overview: Overview | null = null;
+  /** Tiles are drawn at the current zoom (always, except zoomed out on the Earth map). */
+  private tilesShown = true;
 
   constructor(
     private app: Application,
@@ -388,10 +408,57 @@ export class BoardView {
       this.labelLayer,
     );
     this.root.addChild(this.chunkLayer, this.overlay);
+    this.useMap(game);
+  }
+
+  /** Online games colour land by owner: their textures exist only then. */
+  private useOwners(game: Game): void {
+    if (game.online && !this.tex.owners) this.tex.owners = buildOwnerTextures(this.app.renderer, this.palette, SIGNATURE_COLORS);
+    else if (!game.online && this.tex.owners) {
+      destroyOwnerTextures(this.tex.owners);
+      this.tex.owners = undefined;
+    }
+  }
+
+  /** Wrap, map rows and the overview follow the game's map (none for the endless world). */
+  private useMap(game: Game): void {
+    this.useOwners(game);
+    this.w = game.wrap;
+    this.rows = game.world.map?.h ?? 0;
+    this.overview?.destroy();
+    this.overview = game.world.map ? new Overview(game, this.palette) : null;
+    if (this.overview) this.screen.addChild(this.overview.root);
+    this.root.visible = true;
+    this.tilesShown = true;
+  }
+
+  /** Canonical column (the world wraps in Earth mode). */
+  private cx(x: number): number {
+    return wrapX(x, this.w);
+  }
+
+  /** Shortest column offset a - b (across the seam in Earth mode). */
+  private dx(a: number, b: number): number {
+    return deltaX(a, b, this.w);
+  }
+
+  /** Is column x within [x0, x1], in any copy of a wrapping world? */
+  private inCols(x: number, x0: number, x1: number): boolean {
+    if (!this.w) return x >= x0 && x <= x1;
+    return this.cx(x - x0) <= x1 - x0;
+  }
+
+  /** Does the column range [a0, a1] overlap [x0, x1], in any copy of a wrapping world? */
+  private boxInCols(a0: number, a1: number, x0: number, x1: number): boolean {
+    if (!this.w) return a1 >= x0 && a0 <= x1;
+    const shift = a0 - this.cx(a0);
+    for (const k of [-this.w, 0, this.w]) if (a1 - shift + k >= x0 && a0 - shift + k <= x1) return true;
+    return false;
   }
 
   setGame(game: Game): void {
     this.game = game;
+    this.useMap(game);
     this.terrainShown = game.world.started;
     for (const c of this.chunks.values()) c.destroy();
     this.chunks.clear();
@@ -431,6 +498,7 @@ export class BoardView {
     this.palette = p;
     const old = this.tex;
     this.tex = buildTextures(this.app.renderer, p);
+    this.useOwners(this.game);
     this.hoverSprite.texture = this.tex.unknownHover;
     for (const m of this.marks) m.sprite.texture = this.tex.flagGlyph;
     for (const c of this.covers) this.releaseCover(c);
@@ -438,6 +506,7 @@ export class BoardView {
     for (const s of this.markPool) s.texture = this.tex.flagGlyph;
     for (const c of this.chunks.values()) c.refresh(this.tex, this.game);
     destroyTextures(old);
+    this.overview?.setPalette(p);
     this.overlayDirty = true;
   }
 
@@ -455,7 +524,7 @@ export class BoardView {
         else if (isRevealed(c.state) && (prev === CellState.Unknown || prev === CellState.Flag)) {
           // Reveals ripple outwards from the clicked cell (a cascade's start, or the chorded number).
           const from = this.rippleFrom ?? c.from;
-          const delay = from === undefined ? 0 : Math.hypot(c.x - keyX(from), c.y - keyY(from)) * COVER_STEP_MS;
+          const delay = from === undefined ? 0 : Math.hypot(this.dx(c.x, keyX(from)), c.y - keyY(from)) * COVER_STEP_MS;
           // A cell whose fog is still lifting (the first click's start area) flips
           // out of the fog when the fog wave reaches it.
           const fog = this.covers.find((f) => f.key === k && f.hideBg && f.ms !== COVER_MS);
@@ -464,8 +533,9 @@ export class BoardView {
           else this.startCover(k, v.bg[((c.y & 15) << 4) | (c.x & 15)].texture, now + delay, COVER_MS);
         }
       }
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) touched.add(cellKey(c.x + dx, c.y + dy));
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) touched.add(cellKey(this.cx(c.x + dx), c.y + dy));
     }
+    this.overview?.paintKeys(touched);
     // Terrain exists only once the first click set the start: repaint what is
     // already on screen (after the loop above, which needs the old states).
     if (!this.terrainShown && this.game.world.started) {
@@ -479,6 +549,7 @@ export class BoardView {
   }
 
   private paintCell(x: number, y: number, now?: number): void {
+    x = this.cx(x);
     const v = this.chunks.get(cellKey(x >> 4, y >> 4));
     if (!v) return;
     const i = ((y & 15) << 4) | (x & 15);
@@ -544,22 +615,26 @@ export class BoardView {
     if (!keys.length) return;
     const now = performance.now();
     // It spreads outwards from `from` (else the area's centre), timed from its nearest cell.
+    this.overview?.paintKeys(keys);
     let ox = 0;
     let oy = 0;
     if (from !== undefined) {
       ox = keyX(from);
       oy = keyY(from);
     } else {
+      // Summed relative to the first cell, so an area across the seam (Earth mode) centres right.
+      const x0 = keyX(keys[0]);
       for (const k of keys) {
-        ox += keyX(k);
+        ox += this.dx(keyX(k), x0);
         oy += keyY(k);
       }
-      ox /= keys.length;
+      ox = x0 + ox / keys.length;
       oy /= keys.length;
     }
+    const dist = (x: number, y: number) => Math.hypot(this.dx(x, ox), y - oy);
     let dMin = Infinity;
-    for (const k of keys) dMin = Math.min(dMin, Math.hypot(keyX(k) - ox, keyY(k) - oy));
-    const delayOf = (x: number, y: number) => (Math.hypot(x - ox, y - oy) - dMin) * FOG_STEP_MS + hash01(7, x, y) * 60;
+    for (const k of keys) dMin = Math.min(dMin, dist(keyX(k), keyY(k)));
+    const delayOf = (x: number, y: number) => (dist(x, y) - dMin) * FOG_STEP_MS + hash01(7, x, y) * 60;
     // Cells already opened when their fog lifts (the first click's start area)
     // come out of the fog closed and flip open once the whole fog has lifted,
     // in a ripple from the same origin.
@@ -575,7 +650,7 @@ export class BoardView {
       this.startCover(k, this.tex.fog, now + delayOf(x, y), FOG_LIFT_MS, true);
       if (isRevealed(this.game.cellState(x, y))) {
         const c = this.covers.find((f) => f.key === k);
-        if (c) this.holdClosed(c, fogEnd + Math.hypot(x - ox, y - oy) * COVER_STEP_MS);
+        if (c) this.holdClosed(c, fogEnd + dist(x, y) * COVER_STEP_MS);
       }
     }
     this.overlayDirty = true;
@@ -584,6 +659,7 @@ export class BoardView {
   /** Repaint every chunk (a mining technology unlocked a tier). */
   refreshAll(): void {
     for (const c of this.chunks.values()) c.refresh(this.tex, this.game);
+    this.overview?.repaint();
     this.setHover(this.hover);
     this.overlayDirty = true;
   }
@@ -744,7 +820,7 @@ export class BoardView {
       for (let i = 0; i < CHUNK * CHUNK; i++) {
         const x = v.cx * CHUNK + (i & 15);
         const y = v.cy * CHUNK + (i >> 4);
-        const p = cam.worldToScreen((x + 0.5) * CELL, (y + 0.5) * CELL);
+        const p = cam.worldToScreen((cam.nearCellX(x) + 0.5) * CELL, (y + 0.5) * CELL);
         const f = Math.min(1, Math.max(0, (p.x + p.y) / diag));
         const t = (now - fx.start - f * INTRO_SPAN_MS - hash01(0x1a7e, x, y) * INTRO_JITTER_MS) / INTRO_TILE_MS;
         const k = t <= 0 ? 0 : t >= 1 ? 1 : easeOutBack(t);
@@ -815,7 +891,7 @@ export class BoardView {
   /** Settlement: a ripple of tile pulses from the batch centre outwards. */
   pulse(keys: number[], cx: number, cy: number, color: number): void {
     let maxD = 0;
-    for (const k of keys) maxD = Math.max(maxD, Math.hypot(keyX(k) - cx, keyY(k) - cy));
+    for (const k of keys) maxD = Math.max(maxD, Math.hypot(this.dx(keyX(k), cx), keyY(k) - cy));
     const start = performance.now();
     this.pulses.push({ keys, cx, cy, color, start, end: start + maxD * PULSE_STEP_MS + PULSE_MS });
   }
@@ -830,7 +906,7 @@ export class BoardView {
     for (const c of chain) {
       let at = Infinity;
       for (const b of done) {
-        const d = Math.hypot(c.x - b.x, c.y - b.y);
+        const d = Math.hypot(this.dx(c.x, b.x), c.y - b.y);
         if (d <= b.r + 0.5) at = Math.min(at, b.at + d * BLAST_STEP_MS);
       }
       if (at === Infinity) at = done[done.length - 1].at;
@@ -863,7 +939,7 @@ export class BoardView {
    */
   grand(members: number[], cx: number, cy: number, text: string, color: number): void {
     let r = 0;
-    for (const k of members) r = Math.max(r, Math.hypot(keyX(k) + 0.5 - cx, keyY(k) + 0.5 - cy));
+    for (const k of members) r = Math.max(r, Math.hypot(this.dx(keyX(k) + 0.5, cx), keyY(k) + 0.5 - cy));
     this.pulse(members, cx - 0.5, cy - 0.5, color);
     const label = new Text({ text, style: { fontFamily: 'Cascadia Code, SF Mono, Consolas, monospace', fontSize: 14, fontWeight: '700', fill: color } });
     label.anchor.set(0.5);
@@ -988,6 +1064,18 @@ export class BoardView {
 
     const vis = cam.visibleCells();
     this.vis = vis;
+    // Earth mode zoomed out: the overview fades in over the tiles, which stop being drawn.
+    if (this.overview) {
+      const intro = this.introFx ? Math.min(1, Math.max(0, (performance.now() - this.introFx.start) / INTRO_SPAN_MS)) : 1;
+      this.overview.update(cam, intro * Math.min(1, Math.max(0, (OVERVIEW_ZOOM - cam.zoom) / (OVERVIEW_ZOOM - TILE_MIN_ZOOM))));
+    }
+    const tiles = !this.overview || cam.zoom >= TILE_MIN_ZOOM;
+    if (tiles !== this.tilesShown) {
+      this.tilesShown = tiles;
+      this.root.visible = tiles;
+      if (tiles) this.overlayDirty = true;
+    }
+    if (!tiles) return this.updateEffects(cam);
     const digits = cam.zoom >= DIGIT_MIN_ZOOM;
     if (digits !== this.digitsVisible) {
       this.digitsVisible = digits;
@@ -1001,19 +1089,29 @@ export class BoardView {
       this.lastVisible = { x0: cx0, y0: cy0, x1: cx1, y1: cy1 };
       // Keep a ring of one chunk around the visible ones (built ahead, a few per
       // frame, so a pan never builds a whole row of chunks in the frame it needs them).
-      for (const [k, v] of this.chunks) {
-        if (v.cx < cx0 - 1 || v.cx > cx1 + 1 || v.cy < cy0 - 1 || v.cy > cy1 + 1) {
-          v.destroy();
-          this.chunks.delete(k);
+      // Chunks are keyed by canonical columns: on the Earth map a view across the
+      // seam uses chunks from both ends (`renderSeam` draws the far ones), and
+      // none are built above or below the map.
+      const cols = this.w / CHUNK;
+      const want = new Map<number, boolean>();
+      for (let cy = cy0 - 1; cy <= cy1 + 1; cy++) {
+        if (this.rows && (cy < 0 || cy >= this.rows / CHUNK)) continue;
+        for (let cx = cx0 - 1; cx <= cx1 + 1; cx++) {
+          const k = cellKey(cols ? wrapX(cx, cols) : cx, cy);
+          const visible = cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1;
+          want.set(k, visible || want.get(k) === true);
         }
       }
+      for (const [k, v] of this.chunks) {
+        if (want.has(k)) continue;
+        v.destroy();
+        this.chunks.delete(k);
+      }
       this.prefetch = [];
-      for (let cy = cy0 - 1; cy <= cy1 + 1; cy++) {
-        for (let cx = cx0 - 1; cx <= cx1 + 1; cx++) {
-          if (this.chunks.has(cellKey(cx, cy))) continue;
-          if (cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1) this.addChunk(cx, cy, digits);
-          else this.prefetch.push(cellKey(cx, cy));
-        }
+      for (const [k, visible] of want) {
+        if (this.chunks.has(k)) continue;
+        if (visible) this.addChunk(keyX(k), keyY(k), digits);
+        else this.prefetch.push(k);
       }
       this.overlayDirty = true;
     } else if (this.prefetch.length) {
@@ -1030,6 +1128,11 @@ export class BoardView {
       this.overlayDirty = false;
       this.drawOverlay(vis, cam.zoom);
     }
+    this.updateEffects(cam);
+  }
+
+  /** Per-frame animations; they keep their clocks while the tiles are hidden (Earth overview). */
+  private updateEffects(cam: Camera): void {
     const now = performance.now();
     this.updateIntro(now, cam);
     this.updateMarks(now);
@@ -1040,6 +1143,24 @@ export class BoardView {
     this.drawShipments(now, cam.zoom);
     this.drawSelected(now);
     this.drawDrones(now);
+  }
+
+  /**
+   * Earth mode, after the stage is drawn: where the view crosses the seam, draw
+   * the board once more a world-width to the side. Everything on the board sits
+   * at canonical columns (or continues from them), so the copy shows the
+   * other end of the map in the part of the screen past the seam.
+   */
+  renderSeam(renderer: Renderer): void {
+    if (!this.w || !this.tilesShown || !this.root.visible) return;
+    const span = this.w * CELL * this.root.scale.x;
+    const offsets: number[] = [];
+    if (this.vis.x0 < 0) offsets.push(-span);
+    if (this.vis.x1 >= this.w) offsets.push(span);
+    for (const o of offsets) {
+      const s = this.root.scale.x;
+      renderer.render({ container: this.root, transform: new Matrix(s, 0, 0, s, this.root.x + o, this.root.y), clear: false });
+    }
   }
 
   /**
@@ -1151,11 +1272,13 @@ export class BoardView {
     this.pulses = this.pulses.filter((pl) => now < pl.end);
     for (const pl of this.pulses) {
       for (const k of pl.keys) {
-        const t = (now - pl.start - Math.hypot(keyX(k) - pl.cx, keyY(k) - pl.cy) * PULSE_STEP_MS) / PULSE_MS;
+        // Drawn next to the batch centre (a batch across the seam stays in one piece).
+        const x = pl.cx + this.dx(keyX(k), pl.cx);
+        const t = (now - pl.start - Math.hypot(x - pl.cx, keyY(k) - pl.cy) * PULSE_STEP_MS) / PULSE_MS;
         if (t <= 0 || t >= 1) continue;
         const a = Math.sin(Math.PI * t);
         const grow = 3 * a;
-        g.roundRect(keyX(k) * CELL - grow, keyY(k) * CELL - grow, CELL + 2 * grow, CELL + 2 * grow, 4).fill({ color: pl.color, alpha: 0.5 * a });
+        g.roundRect(x * CELL - grow, keyY(k) * CELL - grow, CELL + 2 * grow, CELL + 2 * grow, 4).fill({ color: pl.color, alpha: 0.5 * a });
       }
     }
   }
@@ -1333,7 +1456,7 @@ export class BoardView {
       for (const [k, prob] of this.probabilities) {
         const x = keyX(k);
         const y = keyY(k);
-        if (x < vis.x0 || x > vis.x1 || y < vis.y0 || y > vis.y1) continue;
+        if (!this.inCols(x, vis.x0, vis.x1) || y < vis.y0 || y > vis.y1) continue;
         if (this.game.cellState(x, y) !== CellState.Unknown) continue;
         const label = this.label(used++);
         label.text = Math.round(prob * 100) + '';
@@ -1357,11 +1480,16 @@ export class BoardView {
     const g = this.baseGfx;
     g.clear();
     const p = this.palette;
+    // Online: no complexes or network, only every player's main base in their colour.
+    if (this.game.online) {
+      for (const m of this.game.mainBases()) drawDiamond(g, keyX(m.key), keyY(m.key), SIGNATURE_COLORS[m.color], p.bg);
+      return;
+    }
     const bases = this.game.bases;
-    const net = (this.net ??= buildNet(bases));
-    const inside = (k: number) => keyX(k) >= vis.x0 - 1 && keyX(k) <= vis.x1 + 1 && keyY(k) >= vis.y0 - 1 && keyY(k) <= vis.y1 + 1;
+    const net = (this.net ??= buildNet(bases, this.w));
+    const inside = (k: number) => this.inCols(keyX(k), vis.x0 - 1, vis.x1 + 1) && keyY(k) >= vis.y0 - 1 && keyY(k) <= vis.y1 + 1;
 
-    const shown = net.complexes.filter(({ box: [x0, y0, x1, y1] }) => x1 >= vis.x0 - 1 && x0 <= vis.x1 + 2 && y1 >= vis.y0 - 1 && y0 <= vis.y1 + 2);
+    const shown = net.complexes.filter(({ box: [x0, y0, x1, y1] }) => this.boxInCols(x0, x1, vis.x0 - 1, vis.x1 + 2) && y1 >= vis.y0 - 1 && y0 <= vis.y1 + 2);
     for (const c of shown) {
       for (const l of c.outer) roundLoop(g, l);
       g.fill({ color: p.accent, alpha: COMPLEX_ALPHA });
@@ -1386,20 +1514,13 @@ export class BoardView {
     if (sel) {
       const route = bases.routePaths(sel.key);
       if (route.length) {
-        for (const path of route) drawPathLine(g, path, 0, path.length - 1);
+        for (const path of route) drawPathLine(g, path, 0, path.length - 1, this.w);
         g.stroke({ width: w, color: p.accent, alpha: 0.35, join: 'miter', cap: 'square' });
       }
       // The base itself is lit up per frame (`drawSelected`).
     }
 
-    if (bases.main !== null) {
-      const x = (keyX(bases.main) + 0.5) * CELL;
-      const y = (keyY(bases.main) + 0.5) * CELL;
-      const h = CELL * 0.44;
-      g.poly([x, y - h, x + h, y, x, y + h, x - h, y]).fill({ color: p.cellOwned });
-      const i = CELL * 0.18;
-      g.poly([x, y - i, x + i, y, x, y + i, x - i, y]).fill({ color: p.bg });
-    }
+    if (bases.main !== null) drawDiamond(g, keyX(bases.main), keyY(bases.main), p.cellOwned, p.bg);
   }
 
   /**
@@ -1423,7 +1544,7 @@ export class BoardView {
     }
     const zf = Math.min(1, (zoom - SHIP_MIN_ZOOM) / (SHIP_FADE_ZOOM - SHIP_MIN_ZOOM));
     const bases = this.game.bases;
-    const net = (this.net ??= buildNet(bases));
+    const net = (this.net ??= buildNet(bases, this.w));
     const live = bases.shipments;
     if (this.shipSeen.size) {
       const alive = new Set(live);
@@ -1445,7 +1566,7 @@ export class BoardView {
 
   private edgeVisible(path: number[]): boolean {
     const vis = this.vis;
-    for (const k of path) if (keyX(k) >= vis.x0 - 1 && keyX(k) <= vis.x1 + 1 && keyY(k) >= vis.y0 - 1 && keyY(k) <= vis.y1 + 1) return true;
+    for (const k of path) if (this.inCols(keyX(k), vis.x0 - 1, vis.x1 + 1) && keyY(k) >= vis.y0 - 1 && keyY(k) <= vis.y1 + 1) return true;
     return false;
   }
 
@@ -1458,7 +1579,7 @@ export class BoardView {
       const a = Math.max(lo, head - ((i + 1) * SHIP_TAIL) / SHIP_PIECES);
       if (a >= hi) continue;
       if (b <= a) break;
-      drawPathLine(g, path, a, b);
+      drawPathLine(g, path, a, b, this.w);
       g.stroke({ width: NET_WIDTH, color, alpha: fade * shipAlpha((i + 0.5) / SHIP_PIECES), cap: 'butt', join: 'miter' });
     }
   }
@@ -1602,7 +1723,7 @@ type Loop = number[];
  * is the members plus, for each pair within reach, the rectangle between
  * them.
  */
-function buildNet(bases: Game['bases']): Net {
+function buildNet(bases: Game['bases'], w: number): Net {
   const tiles = new Set<number>();
   const right = new Set<number>();
   const down = new Set<number>();
@@ -1610,10 +1731,13 @@ function buildNet(bases: Game['bases']): Net {
   const inArea = new Map<number, number>();
   for (const c of bases.complexes.values()) {
     if (c.members.length < 2) continue;
-    const xs = c.members.map(keyX), ys = c.members.map(keyY);
-    const set = new Set(c.members);
-    const area = new Set(c.members);
-    for (const k of c.members) {
+    // Members unwrapped next to the first one (Earth mode), so a complex across the seam is traced in one piece.
+    const x0 = keyX(c.members[0]);
+    const local = c.members.map((k) => cellKey(x0 + deltaX(keyX(k), x0, w), keyY(k)));
+    const xs = local.map(keyX), ys = local.map(keyY);
+    const set = new Set(local);
+    const area = new Set(local);
+    for (const k of local) {
       const x = keyX(k), y = keyY(k);
       for (let dy = -2; dy <= 2; dy++) {
         for (let dx = -2; dx <= 2; dx++) {
@@ -1622,7 +1746,7 @@ function buildNet(bases: Game['bases']): Net {
         }
       }
     }
-    for (const k of area) inArea.set(k, complexes.length);
+    for (const k of area) inArea.set(cellKey(wrapX(keyX(k), w), keyY(k)), complexes.length);
     const outer: Loop[] = [], holes: Loop[] = [];
     for (const l of traceLoops([...area])) (loopArea(l) > 0 ? outer : holes).push(l);
     complexes.push({ outer, holes, box: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] });
@@ -1632,8 +1756,8 @@ function buildNet(bases: Game['bases']): Net {
       tiles.add(path[i]);
       if (!i) continue;
       const a = path[i - 1], b = path[i];
-      // A step's connector belongs to its upper / left cell.
-      if (keyY(a) === keyY(b)) right.add(keyX(a) < keyX(b) ? a : b);
+      // A step's connector belongs to its upper / left cell (across the seam: the cell at the east edge).
+      if (keyY(a) === keyY(b)) right.add(deltaX(keyX(b), keyX(a), w) > 0 ? a : b);
       else down.add(keyY(a) < keyY(b) ? a : b);
     }
   }
@@ -1718,24 +1842,48 @@ function roundLoop(g: Graphics, l: Loop): void {
   g.closePath();
 }
 
+/** Columns of a path's cells, unwrapped from its first cell on a world wrapping every `w` columns (cached per path). */
+const unwrapped = new WeakMap<number[], number[]>();
+function pathXs(path: number[], w: number): number[] {
+  let xs = unwrapped.get(path);
+  if (!xs) {
+    xs = [keyX(path[0])];
+    for (let i = 1; i < path.length; i++) xs.push(xs[i - 1] + deltaX(keyX(path[i]), keyX(path[i - 1]), w));
+    unwrapped.set(path, xs);
+  }
+  return xs;
+}
+
 /** Centre of the cell at fractional position `t` along a path. */
-function pathPoint(path: number[], t: number): { x: number; y: number } {
+function pathPoint(path: number[], t: number, w = 0): { x: number; y: number } {
+  const xs = pathXs(path, w);
   const i = Math.min(path.length - 1, Math.floor(t));
   const j = Math.min(path.length - 1, i + 1);
   const f = t - i;
   return {
-    x: (keyX(path[i]) + (keyX(path[j]) - keyX(path[i])) * f + 0.5) * CELL,
+    x: (xs[i] + (xs[j] - xs[i]) * f + 0.5) * CELL,
     y: (keyY(path[i]) + (keyY(path[j]) - keyY(path[i])) * f + 0.5) * CELL,
   };
 }
 
 /** Polyline through cell centres from fractional position `a` to `b` along a path; the caller strokes it. */
-function drawPathLine(g: Graphics, path: number[], a: number, b: number): void {
-  const s = pathPoint(path, a);
+function drawPathLine(g: Graphics, path: number[], a: number, b: number, w = 0): void {
+  const xs = pathXs(path, w);
+  const s = pathPoint(path, a, w);
   g.moveTo(s.x, s.y);
-  for (let i = Math.floor(a) + 1; i < b; i++) g.lineTo((keyX(path[i]) + 0.5) * CELL, (keyY(path[i]) + 0.5) * CELL);
-  const e = pathPoint(path, b);
+  for (let i = Math.floor(a) + 1; i < b; i++) g.lineTo((xs[i] + 0.5) * CELL, (keyY(path[i]) + 0.5) * CELL);
+  const e = pathPoint(path, b, w);
   g.lineTo(e.x, e.y);
+}
+
+/** The main-base diamond on the cell (x, y). */
+function drawDiamond(g: Graphics, cx: number, cy: number, color: number, bg: number): void {
+  const x = (cx + 0.5) * CELL;
+  const y = (cy + 0.5) * CELL;
+  const h = CELL * 0.44;
+  g.poly([x, y - h, x + h, y, x, y + h, x - h, y]).fill({ color });
+  const i = CELL * 0.18;
+  g.poly([x, y - i, x + i, y, x, y + i, x - i, y]).fill({ color: bg });
 }
 
 function drawDrone(g: Graphics, x: number, y: number, color: number, alpha: number, halted: boolean): void {

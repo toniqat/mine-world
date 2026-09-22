@@ -1,6 +1,7 @@
-import type { Game } from '@mine/core';
+import { MULTI, SIGNATURE_COLORS, type Game, type MirrorGame, type PlayerInfo } from '@mine/core';
 import { fmt } from '../format';
-import { t } from '../i18n';
+import { t, type StringKey } from '../i18n';
+import { hex } from '../theme';
 import { clear, el, svgIcon } from './dom';
 
 export type PanelName = 'base' | 'settings';
@@ -10,6 +11,8 @@ export interface HudHandlers {
   toggleSettings(): void;
   toggleMainBase(): void;
   toggleFlagMode(): void;
+  /** Online: a scoreboard row was clicked; the camera goes to that player's main base. */
+  gotoPlayer(color: number): void;
 }
 
 /** Counters move at least this many units per second... */
@@ -55,6 +58,10 @@ class Counter {
  * the pool count towards their real values; what the pool gains or loses in
  * one go floats out of it as one sum, and a broken combo floats out of the
  * combo.
+ *
+ * Online (Earth multiplayer) there is no pool, combo, credits or main-base
+ * panel: the top right shows my score next to the buttons (flag mode,
+ * settings) and the session's scoreboard under them.
  */
 export class Hud {
   private credits = new Counter();
@@ -82,6 +89,15 @@ export class Hud {
   private pending = 0;
   private pendingSince = 0;
   private last = performance.now();
+  /** Built for an online game (score + scoreboard) rather than the pool and credits. */
+  private onlineMode = false;
+  private score = new Counter();
+  private lastScore = 0;
+  private scoreEl!: HTMLElement;
+  private scorePill!: HTMLElement;
+  private boardEl!: HTMLElement;
+  /** Scoreboard as last drawn (the mirror replaces the array on every change). */
+  private shownPlayers: PlayerInfo[] | null = null;
 
   constructor(
     private hud: HTMLElement,
@@ -92,6 +108,7 @@ export class Hud {
 
   build(): void {
     clear(this.hud);
+    if (this.onlineMode) return this.buildOnline();
     this.creditsEl = el('div', { class: 'value' }, '0');
     this.creditsPill = el('div', { class: 'pill credits' }, el('div', { class: 'label', text: t('hud.credits') }), this.creditsEl);
 
@@ -120,9 +137,29 @@ export class Hud {
     if (this.game) this.paint();
   }
 
+  /** Online: my score and the buttons in one row at the top right, the scoreboard under them. */
+  private buildOnline(): void {
+    const iconBtn = (icon: Parameters<typeof svgIcon>[0], title: string, onclick: () => void) => el('button', { class: 'btn icon', title, html: svgIcon(icon), onclick });
+    this.scoreEl = el('div', { class: 'value' }, '0');
+    this.scorePill = el('div', { class: 'pill credits score' }, el('div', { class: 'label', text: t('hud.score') }), this.scoreEl);
+    this.flagBtn = iconBtn('flag', `${t('hud.flagMode')} (F)`, () => this.h.toggleFlagMode());
+    this.settingsBtn = iconBtn('settings', t('hud.settings'), () => this.h.toggleSettings());
+    this.baseBtn = iconBtn('base', t('hud.mainBase'), () => this.h.toggleMainBase());
+    this.boardEl = el('div', { class: 'scoreboard' });
+    this.shownPlayers = null;
+    this.hud.append(el('div', { class: 'hud-right online' }, el('div', { class: 'hud-row' }, this.scorePill, el('div', { class: 'pill menu' }, this.flagBtn, this.settingsBtn)), this.boardEl));
+    if (this.game) this.paint();
+  }
+
   /** Show `game` from scratch (no counting up from the previous world). */
   bind(game: Game): void {
     this.game = game;
+    if (game.online !== this.onlineMode) {
+      this.onlineMode = game.online;
+      this.build();
+    }
+    this.lastScore = (game as MirrorGame).mine?.()?.score ?? 0;
+    this.score.snap(this.lastScore);
     this.credits.snap(game.econ.credits);
     this.pool.snap(game.econ.unbanked);
     this.lastUnbanked = game.econ.unbanked;
@@ -154,6 +191,7 @@ export class Hud {
     const now = performance.now();
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
+    if (this.onlineMode) return this.updateOnline(game as MirrorGame, now, dt);
     const e = game.econ;
 
     // What the pool gained or lost since the last frame (a Cash Out's drop is not a loss).
@@ -183,9 +221,51 @@ export class Hud {
     this.paint();
   }
 
+  /** Online: my score counts up and its gains float out of it, like the pool's. */
+  private updateOnline(g: MirrorGame, now: number, dt: number): void {
+    const sc = g.mine()?.score ?? this.lastScore;
+    const d = sc - this.lastScore;
+    this.lastScore = sc;
+    if (d !== 0) {
+      if (this.pending !== 0 && Math.sign(d) !== Math.sign(this.pending)) this.flushFloat();
+      if (this.pending === 0) this.pendingSince = now;
+      this.pending += d;
+    }
+    if (this.pending !== 0 && now - this.pendingSince >= FLOAT_MS) this.flushFloat();
+    this.score.target = sc;
+    this.score.step(dt);
+    this.paint();
+  }
+
+  /**
+   * The session's players by score: colour, name (mine marked), score; offline
+   * players dimmed. A player with a main base can be clicked to go there.
+   */
+  private paintBoard(g: MirrorGame): void {
+    if (this.shownPlayers === g.players) return;
+    this.shownPlayers = g.players;
+    clear(this.boardEl);
+    this.boardEl.append(el('div', { class: 'sb-head', text: t('board.title', { n: g.players.length, max: MULTI.maxPlayers }) }));
+    for (const p of g.players) {
+      const me = p.color === g.me;
+      const dot = el('span', { class: 'sb-dot' });
+      dot.style.background = hex(SIGNATURE_COLORS[p.color]);
+      const name = el('span', { class: 'sb-name' }, t(`color.${p.color}` as StringKey), me ? el('span', { class: 'sb-you', text: t('board.you') }) : null, p.online ? null : el('span', { class: 'sb-off', text: t('board.offline') }));
+      const jump = p.main !== null;
+      const row = el('div', { class: `sb-row${me ? ' me' : ''}${p.online ? '' : ' off'}${jump ? ' jump' : ''}` }, dot, name, el('span', { class: 'sb-score', text: fmt(p.score) }));
+      if (jump) row.addEventListener('click', () => this.h.gotoPlayer(p.color));
+      this.boardEl.append(row);
+    }
+  }
+
   private paint(): void {
     const g = this.game;
     if (!g) return;
+    if (this.onlineMode) {
+      this.scoreEl.textContent = this.score.text();
+      this.paintBoard(g as MirrorGame);
+      return;
+    }
     const e = g.econ;
     this.creditsEl.textContent = this.credits.text();
     this.poolEl.textContent = this.pool.text();
@@ -205,7 +285,7 @@ export class Hud {
     const v = this.pending;
     this.pending = 0;
     if (Math.abs(v) < 0.5) return;
-    this.float(this.poolPill, `${v > 0 ? '+' : '−'}${fmt(Math.abs(v))}`, v < 0);
+    this.float(this.onlineMode ? this.scorePill : this.poolPill, `${v > 0 ? '+' : '−'}${fmt(Math.abs(v))}`, v < 0);
   }
 
   private float(parent: HTMLElement, text: string, loss: boolean): void {

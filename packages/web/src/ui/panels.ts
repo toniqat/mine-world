@@ -69,7 +69,7 @@ export class Panels {
         this.renderBase(game);
         break;
       case 'settings':
-        this.renderSettings(settings);
+        this.renderSettings(settings, game.online);
         break;
     }
     this.body.scrollTop = scroll;
@@ -130,7 +130,8 @@ export class Panels {
     return el('div', { class: 'row' }, left, right);
   }
 
-  private renderSettings(s: Settings): void {
+  /** `online`: the Earth multiplayer has nothing to save or restart here. */
+  private renderSettings(s: Settings, online: boolean): void {
     const field = (label: string, control: HTMLElement) => el('div', { class: 'field' }, el('span', {}, label), control);
     const select = (value: string, options: Array<[string, string]>, onchange: (v: string) => void) => {
       const sel = el('select', { onchange: (e) => onchange((e.target as HTMLSelectElement).value) });
@@ -138,7 +139,7 @@ export class Panels {
       return sel;
     };
     const emit = () => this.h.settingsChanged(s);
-    // Touch devices have one input: a tap marks (no input mode, no long press).
+    // Touch devices have one input: a tap marks (no input mode).
     const touch = isTouchDevice();
     this.body.append(
       field(
@@ -162,27 +163,13 @@ export class Panels {
           emit();
         }),
       ),
-      touch ? '' : field(
-        t('settings.longPress'),
-        el('input', {
-          type: 'number',
-          min: 200,
-          max: 1500,
-          step: 50,
-          value: s.longPressMs,
-          onchange: (e) => {
-            s.longPressMs = Number((e.target as HTMLInputElement).value) || 450;
-            emit();
-          },
-        }),
-      ),
-      el(
+      online ? '' : el(
         'div',
         { class: 'field' },
         el('span', {}),
         el('div', {}, el('button', { class: 'btn small', text: t('settings.save'), onclick: () => this.h.saveNow() }), ' ', el('button', { class: 'btn small danger', text: t('settings.newGame'), onclick: () => this.h.newGame() })),
       ),
-      el('div', { class: 'help', text: t(touch ? 'settings.help.touch' : 'settings.help') }),
+      el('div', { class: 'help', text: t(touch ? 'settings.help.touch' : online ? 'settings.help.online' : 'settings.help') }),
       el('div', { class: 'help', text: `v0.1 · ${getLang()}` }),
     );
   }

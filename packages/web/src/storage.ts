@@ -4,7 +4,13 @@ import type { ThemeSetting } from './theme';
 /** Persistence: game saves in IndexedDB (structured clone), settings in localStorage. */
 const DB_NAME = 'mineworld';
 const STORE = 'saves';
-const KEY = 'main';
+
+/**
+ * Save slots: only the endless world ('main') is saved in the browser. The
+ * Earth map is played online now (its sessions live on the server); the old
+ * single-player 'earth' slot is no longer read.
+ */
+export type SaveSlot = 'main';
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -17,12 +23,12 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function loadSave(): Promise<SaveData | null> {
+export async function loadSave(slot: SaveSlot = 'main'): Promise<SaveData | null> {
   try {
     const db = await openDb();
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly');
-      const req = tx.objectStore(STORE).get(KEY);
+      const req = tx.objectStore(STORE).get(slot);
       req.onsuccess = () => resolve((req.result as SaveData) ?? null);
       req.onerror = () => reject(req.error);
     });
@@ -32,21 +38,21 @@ export async function loadSave(): Promise<SaveData | null> {
   }
 }
 
-export async function writeSave(data: SaveData): Promise<void> {
+export async function writeSave(data: SaveData, slot: SaveSlot = 'main'): Promise<void> {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(data, KEY);
+    tx.objectStore(STORE).put(data, slot);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
-export async function clearSave(): Promise<void> {
+export async function clearSave(slot: SaveSlot = 'main'): Promise<void> {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).delete(KEY);
+    tx.objectStore(STORE).delete(slot);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -59,7 +65,6 @@ export interface Settings {
   theme: ThemeSetting;
   lang: LangSetting;
   inputMode: InputMode;
-  longPressMs: number;
   showProbabilities: boolean;
 }
 
@@ -73,7 +78,6 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: 'auto',
   lang: systemLang(),
   inputMode: 'classic',
-  longPressMs: 450,
   showProbabilities: true,
 };
 
@@ -84,6 +88,8 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const s = { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    // Long press is gone; older settings still carry its delay.
+    delete (s as Partial<Settings> & { longPressMs?: number }).longPressMs;
     // Older settings could follow the system language ('auto'); that choice is gone.
     if (s.lang !== 'ko' && s.lang !== 'en') s.lang = systemLang();
     return s;

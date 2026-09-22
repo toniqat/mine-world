@@ -9,7 +9,7 @@ import { Econ } from './econ/income';
 import { Upgrades } from './econ/upgrades';
 import { Emitter } from './events';
 import { Fog } from './fog';
-import { cellKey, chebyshev, forEachNeighbor, keyX, keyY } from './key';
+import { cellKey, chebyshev, deltaX, forEachNeighbor, keyX, keyY, wrapX } from './key';
 import { resolveReveal } from './resolve';
 import type { SaveData } from './save';
 import { ALL_TIERS, NO_TIERS, solve, type SolveOptions, type SolveResult, type TierSet } from './solver';
@@ -176,6 +176,7 @@ export class Game {
     this.world = new World(this.cfg.world, seed);
     this.board = new Board();
     this.board.terrain = (x, y) => this.world.terrain(x, y);
+    this.board.wrap = this.world.wrap;
     this.scanners = [];
     this.ctx = { board: this.board, world: this.world, scanners: this.scanners };
     const cores = this.econ?.cores ?? 0;
@@ -183,9 +184,9 @@ export class Game {
     this.econ = new Econ(this.cfg.econ, this.cfg.world.densityMin);
     this.econ.cores = cores;
     if (lifetime) this.econ.lifetime = lifetime;
-    this._bases = new Bases(this.cfg.bases, this.econ, (x, y) => this.board.get(x, y));
+    this._bases = new Bases(this.cfg.bases, this.econ, (x, y) => this.board.get(x, y), this.world.wrap);
     this.basesDirty = true;
-    this.fog = new Fog(this.cfg.fog);
+    this.fog = new Fog(this.cfg.fog, this.world.wrap);
     this.questions = new Set();
     this.upgrades = new Upgrades();
     this.applyUpgrades();
@@ -214,6 +215,20 @@ export class Game {
   }
 
   /**
+   * Columns after which the world repeats (the Earth mode's map width), 0 when
+   * it does not wrap. Every method takes any x; cells in events, keys and saves
+   * are canonical (0 <= x < wrap).
+   */
+  get wrap(): number {
+    return this.world.wrap;
+  }
+
+  /** Canonical column of `x` (see `wrap`). */
+  wx(x: number): number {
+    return wrapX(x, this.world.wrap);
+  }
+
+  /**
    * Hidden by the fog of war: a closed cell (Unknown, flag or wall) no vision
    * source has seen yet. It cannot be opened or flagged, and walls under it
    * look like any other fogged cell. Before the start is set everything is
@@ -229,7 +244,7 @@ export class Game {
   tierAt(x: number, y: number): number {
     const c = this.cfg.tiers;
     if (!c.enabled || !this.world.started) return 1;
-    const d = Math.hypot(x - this.world.startX, y - this.world.startY);
+    const d = this.world.distFromStart(x, y);
     let t = 1;
     for (const r of c.radii) if (d >= r) t++;
     return t;
@@ -252,6 +267,21 @@ export class Game {
   /** The unbanked pool is full: nothing can be opened until Cash Out. */
   full(): boolean {
     return this.econ.full();
+  }
+
+  /** Played online (`MirrorGame`): the server decides every opening and settlement. */
+  get online(): boolean {
+    return false;
+  }
+
+  /** Online: signature colour index of the player owning an opened cell or base; -1 for nobody (always offline). */
+  cellOwner(_x: number, _y: number): number {
+    return -1;
+  }
+
+  /** Online: every player's main base and colour index. Offline the main base is `bases.main`. */
+  mainBases(): Array<{ key: number; color: number }> {
+    return [];
   }
 
   /** Solver tiers of the drone equipment (none unless equipped). */
@@ -293,7 +323,7 @@ export class Game {
 
   /** Base at (x, y): an Owned mine or the main base. */
   baseInfo(x: number, y: number): BaseInfo | null {
-    return this.bases.info(cellKey(x, y));
+    return this.bases.info(cellKey(this.wx(x), y));
   }
 
   ownedKeys(): Iterable<number> {
@@ -330,6 +360,7 @@ export class Game {
   // ------------------------------------------------------------------ actions
 
   reveal(x: number, y: number, actor: Actor = PLAYER, basis?: number[]): RevealResult {
+    x = this.wx(x);
     if (this.board.get(x, y) !== CellState.Unknown) return { hit: false, revealed: 0, intervened: false };
     // The world starts all Unknown and fogged. The first click places the main
     // base there (fog or not) and opens the mine-free start area around it.
@@ -377,6 +408,7 @@ export class Game {
    * unbanked pool fills up.
    */
   chord(x: number, y: number, actor: Actor = PLAYER): RevealResult {
+    x = this.wx(x);
     const s = this.board.get(x, y);
     const out: RevealResult = { hit: false, revealed: 0, intervened: false };
     if (!isRevealed(s)) return out;
@@ -387,7 +419,7 @@ export class Game {
       const ns = this.board.get(nx, ny);
       if (ns === CellState.Flag || isKnownMine(ns)) marked++;
       else if (ns === CellState.Unknown && !this.fogged(nx, ny) && !this.locked(nx, ny)) targets.push([nx, ny]);
-    });
+    }, this.world.wrap);
     if (marked !== n || targets.length === 0) return out;
     if (this.econ.full()) return { ...out, full: true };
     this.inAction++;
@@ -407,6 +439,7 @@ export class Game {
 
   /** Toggle a flag. Has no observable effect beyond the flag itself (INV-2) except component closure (§9.2). */
   toggleFlag(x: number, y: number, actor: Actor = PLAYER): boolean {
+    x = this.wx(x);
     const s = this.board.get(x, y);
     if (this.fogged(x, y) || this.locked(x, y)) return false;
     if (s === CellState.Unknown) return this.setFlag(x, y, true, actor), true;
@@ -416,7 +449,7 @@ export class Game {
 
   /** Carries a "?" mark (see `cycleMark`). */
   questioned(x: number, y: number): boolean {
-    return this.questions.has(cellKey(x, y));
+    return this.questions.size > 0 && this.questions.has(cellKey(this.wx(x), y));
   }
 
   /**
@@ -425,6 +458,7 @@ export class Game {
    * opened, chorded into and is never settled).
    */
   cycleMark(x: number, y: number): void {
+    x = this.wx(x);
     const s = this.board.get(x, y);
     if (this.fogged(x, y) || this.locked(x, y)) return;
     const k = cellKey(x, y);
@@ -439,6 +473,7 @@ export class Game {
   }
 
   setFlag(x: number, y: number, on: boolean, actor: Actor = PLAYER): void {
+    x = this.wx(x);
     const s = this.board.get(x, y);
     if (on && (s !== CellState.Unknown || this.fogged(x, y) || this.locked(x, y))) return;
     if (!on && s !== CellState.Flag) return;
@@ -492,14 +527,14 @@ export class Game {
       if (i === 0) ev.r = r;
       else ev.chain.push({ x: bx, y: by, r });
       for (const [k, m] of this.econ.owned) {
-        if (m.disabled || !inBlast(keyX(k) - bx, keyY(k) - by, r)) continue;
+        if (m.disabled || !inBlast(deltaX(keyX(k), bx, this.world.wrap), keyY(k) - by, r)) continue;
         m.disabled = true;
         ev.disabled.push(k);
       }
       const n = Math.ceil(r);
       for (let dy = -n; dy <= n; dy++) {
         for (let dx = -n; dx <= n; dx++) {
-          const fx = bx + dx;
+          const fx = this.wx(bx + dx);
           const fy = by + dy;
           if (!inBlast(dx, dy, r) || this.board.get(fx, fy) !== CellState.Flag) continue;
           // What the blast shows (mine or not) is observed truth: pin it.
@@ -521,6 +556,7 @@ export class Game {
 
   /** Bring a disabled base back for `repairCost()` credits. */
   repairBase(x: number, y: number): { ok: boolean; reason?: 'notDisabled' | 'money' } {
+    x = this.wx(x);
     const m = this.econ.owned.get(cellKey(x, y));
     if (!m?.disabled) return { ok: false, reason: 'notDisabled' };
     const cost = this.repairCost();
@@ -558,12 +594,13 @@ export class Game {
 
   /** Drones stand on Owned mines only, one per mine. */
   canPlaceDrone(id: number, x: number, y: number): boolean {
+    x = this.wx(x);
     return this.board.get(x, y) === CellState.Owned && !this.drones.occupied(x, y, id);
   }
 
   placeDrone(id: number, x: number, y: number): boolean {
     if (!this.canPlaceDrone(id, x, y)) return false;
-    this.drones.place(id, x, y);
+    this.drones.place(id, this.wx(x), y);
     this.events.emit('drones', this.drones.drones);
     return true;
   }
@@ -593,6 +630,7 @@ export class Game {
    * for future items, with the price passed by the caller.
    */
   useScanner(cx: number, cy: number, r: 1 | 2, cost = 0): ScannerInfo | null {
+    cx = this.wx(cx);
     if (!this.econ.spend(cost)) return null;
     let n = 0;
     for (let y = cy - r; y <= cy + r; y++) {
@@ -601,7 +639,7 @@ export class Game {
         if (isKnownMine(s)) n++;
         else if (!isRevealed(s)) {
           const t = this.world.truth(x, y);
-          this.world.commit(cellKey(x, y), t);
+          this.world.commit(cellKey(this.wx(x), y), t);
           n += t;
         }
       }
@@ -617,6 +655,7 @@ export class Game {
 
   /** Probe (§11): reveals one cell's truth. A mine becomes owned immediately; a safe cell opens. Not offered to the player at the moment. */
   useProbe(x: number, y: number, cost = 0): { mine: boolean } | null {
+    x = this.wx(x);
     const s = this.board.get(x, y);
     if (s !== CellState.Unknown && s !== CellState.Flag) return null;
     if (!this.econ.spend(cost)) return null;
@@ -687,6 +726,7 @@ export class Game {
   // ---------------------------------------------------------------- internals
 
   private setCell(x: number, y: number, s: number, from?: number): void {
+    x = this.wx(x);
     this.board.set(x, y, s);
     // An opened cell sees around itself, so a cascade never runs into fog.
     if (isRevealed(s) && this.cfg.fog.enabled) this.fog.opened(x, y);
@@ -696,6 +736,7 @@ export class Game {
 
   /** Reveal a safe cell and flood-fill through zeros. Returns cells revealed. */
   private cascade(sx: number, sy: number): number {
+    sx = this.wx(sx);
     const origin = cellKey(sx, sy);
     const stack: number[] = [origin];
     const { cascadeRadius, cascadeCap } = this.cfg.play;
@@ -705,19 +746,19 @@ export class Game {
       const x = keyX(k);
       const y = keyY(k);
       if (this.board.get(x, y) !== CellState.Unknown) continue;
-      if (count > 0 && (count >= cascadeCap || chebyshev(x, y, sx, sy) > cascadeRadius || this.fogged(x, y) || this.locked(x, y))) continue;
+      if (count > 0 && (count >= cascadeCap || chebyshev(x, y, sx, sy, this.world.wrap) > cascadeRadius || this.fogged(x, y) || this.locked(x, y))) continue;
       let n = 0;
       forEachNeighbor(x, y, (nx, ny) => {
         const s = this.board.get(nx, ny);
         if (isKnownMine(s)) n++;
         else if (!isRevealed(s)) n += this.world.truth(nx, ny);
-      });
+      }, this.world.wrap);
       this.setCell(x, y, revealedState(n), origin);
       count++;
       if (n === 0) {
         forEachNeighbor(x, y, (nx, ny) => {
           if (this.board.get(nx, ny) === CellState.Unknown) stack.push(cellKey(nx, ny));
-        });
+        }, this.world.wrap);
       }
     }
     return count;
@@ -747,10 +788,10 @@ export class Game {
           forEachNeighbor(x, y, (fx, fy) => {
             const fk = cellKey(fx, fy);
             if (!done.has(fk) && this.board.get(fx, fy) === CellState.Flag && this.isSettleable(fx, fy)) candidates.push(fk);
-          });
+          }, this.world.wrap);
         };
         consider(cx, cy);
-        forEachNeighbor(cx, cy, consider);
+        forEachNeighbor(cx, cy, consider, this.world.wrap);
         for (const fk of candidates) {
           if (done.has(fk)) continue;
           const batch = this.collectBatch(fk, done);
@@ -800,7 +841,7 @@ export class Game {
     let sealed = true;
     forEachNeighbor(x, y, (nx, ny) => {
       if (this.board.get(nx, ny) === CellState.Unknown) sealed = false;
-    });
+    }, this.world.wrap);
     return sealed;
   }
 
@@ -813,7 +854,7 @@ export class Game {
       if (!isRevealed(s) || numberOf(s) === 0) return;
       numbers++;
       if (!this.isSealedNumber(nx, ny)) ok = false;
-    });
+    }, this.world.wrap);
     return ok && numbers > 0;
   }
 
@@ -835,8 +876,8 @@ export class Game {
           if (done.has(k2) || this.board.get(fx, fy) !== CellState.Flag || !this.isSettleable(fx, fy)) return;
           done.add(k2);
           queue.push(k2);
-        });
-      });
+        }, this.world.wrap);
+      }, this.world.wrap);
     }
     return batch;
   }
@@ -852,10 +893,12 @@ export class Game {
     const wrong: number[] = [];
     let ax = 0;
     let ay = 0;
+    // x is summed relative to the first flag, so a batch across the seam averages to its real centre.
+    const x0 = keyX(batch[0]);
     for (const k of batch) {
       const x = keyX(k);
       const y = keyY(k);
-      ax += x;
+      ax += deltaX(x, x0, this.world.wrap);
       ay += y;
       // Truth is stable without an override; the resulting board state encodes it.
       const t = this.world.truth(x, y);
@@ -876,7 +919,7 @@ export class Game {
     if (tainted) this.stats.forfeited = (this.stats.forfeited ?? 0) + correct.length;
     const n = batch.length;
     const ev: SettlementEvent = {
-      x: Math.round(ax / n),
+      x: this.wx(x0 + Math.round(ax / n)),
       y: Math.round(ay / n),
       correct: correct.length,
       wrong: wrong.length,

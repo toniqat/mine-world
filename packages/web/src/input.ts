@@ -32,16 +32,11 @@ const DRAG_THRESHOLD = 6;
 const TOUCH_DRAG_THRESHOLD = 10;
 
 export class InputController {
-  longPressMs = 450;
-  /** Long press as a secondary action (off on touch devices, where a tap already marks). */
-  longPress = true;
   /** Off while the title screen or the intro is up: pointer, wheel and keys are ignored. */
   enabled = true;
   private pointers = new Map<number, PointerRec>();
   private dragging = false;
   private grabbing = false;
-  private longPressTimer: number | null = null;
-  private longPressed = false;
   private pinchDist = 0;
   /** Screen midpoint of the two pinching pointers. */
   private pinchMid = { x: 0, y: 0 };
@@ -97,25 +92,13 @@ export class InputController {
     const rec: PointerRec = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, button: e.button, isTouch: e.pointerType === 'touch' };
     this.pointers.set(e.pointerId, rec);
     this.velocity = { x: 0, y: 0 };
-    this.longPressed = false;
     if (this.pointers.size === 1) {
       this.dragging = false;
-      this.clearLongPress();
       if (e.button === 0 && this.h.grab?.(this.cellAt(rec.x, rec.y))) {
         this.grabbing = true;
         return;
       }
-      if (e.button === 0 && this.longPress) {
-        this.longPressTimer = window.setTimeout(() => {
-          this.longPressTimer = null;
-          if (this.dragging || this.pointers.size !== 1) return;
-          this.longPressed = true;
-          this.h.secondary(this.cellAt(rec.x, rec.y));
-          if (navigator.vibrate) navigator.vibrate(12);
-        }, this.longPressMs);
-      }
     } else if (this.pointers.size === 2) {
-      this.clearLongPress();
       this.endGrab(null);
       this.dragging = true;
       this.h.hover(null);
@@ -153,7 +136,6 @@ export class InputController {
     }
     if (!this.dragging && Math.hypot(rec.x - rec.startX, rec.y - rec.startY) > (rec.isTouch ? TOUCH_DRAG_THRESHOLD : DRAG_THRESHOLD)) {
       this.dragging = true;
-      this.clearLongPress();
     }
     if (this.dragging) {
       const dx = rec.x - px;
@@ -173,7 +155,6 @@ export class InputController {
     const rec = this.pointers.get(e.pointerId);
     if (!rec) return;
     this.pointers.delete(e.pointerId);
-    this.clearLongPress();
     if (this.grabbing) {
       this.endGrab(e.type === 'pointercancel' ? null : this.cellAt(rec.x, rec.y));
       return;
@@ -196,7 +177,6 @@ export class InputController {
       if (performance.now() - this.lastMove.t > 80) this.velocity = { x: 0, y: 0 };
       return;
     }
-    if (this.longPressed) return;
     const cell = this.cellAt(rec.x, rec.y);
     if (rec.button === 2) this.h.secondary(cell);
     else if (rec.button === 0) this.h.primary(cell);
@@ -227,13 +207,6 @@ export class InputController {
     if (!this.grabbing) return;
     this.grabbing = false;
     this.h.grabEnd?.(cell);
-  }
-
-  private clearLongPress(): void {
-    if (this.longPressTimer !== null) {
-      clearTimeout(this.longPressTimer);
-      this.longPressTimer = null;
-    }
   }
 }
 

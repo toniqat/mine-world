@@ -46,7 +46,7 @@ export class RepairBubble {
     if (this.key === null || !this.box) return;
     if (!game.bases.disabled.has(this.key)) return this.hide();
     this.render(game);
-    const p = cam.worldToScreen((keyX(this.key) + 0.5) * CELL, (keyY(this.key) + 0.15) * CELL);
+    const p = cam.worldToScreen((cam.nearCellX(keyX(this.key)) + 0.5) * CELL, (keyY(this.key) + 0.15) * CELL);
     this.box.style.left = `${Math.round(p.x)}px`;
     this.box.style.top = `${Math.round(p.y)}px`;
   }
@@ -102,7 +102,7 @@ export class LockedBubble {
     if (this.key === null || !this.box) return;
     const x = keyX(this.key), y = keyY(this.key);
     if (!game.locked(x, y)) return this.hide();
-    const p = cam.worldToScreen((x + 0.5) * CELL, (y + 0.15) * CELL);
+    const p = cam.worldToScreen((cam.nearCellX(x) + 0.5) * CELL, (y + 0.15) * CELL);
     this.box.style.left = `${Math.round(p.x)}px`;
     this.box.style.top = `${Math.round(p.y)}px`;
   }
