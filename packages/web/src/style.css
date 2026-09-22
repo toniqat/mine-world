@@ -141,6 +141,7 @@ button { cursor: pointer; touch-action: manipulation; }
   background: var(--surface); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
   transform: translateX(-50%) rotate(45deg);
 }
+.bubble.locked { width: auto; max-width: 240px; white-space: nowrap; padding: 8px 12px; font-size: 12px; cursor: pointer; }
 .bubble .name { font-weight: 600; margin-bottom: 2px; }
 .bubble .desc { color: var(--fg-muted); font-size: 12px; margin-bottom: 8px; }
 .bubble .btn.cost-btn { width: 100%; justify-content: space-between; }

@@ -1,5 +1,5 @@
 import { Application } from 'pixi.js';
-import { CellState, Game, cellKey, isRevealed, keyX, keyY, type SaveData } from '@mine/core';
+import { CellState, Game, cellKey, forEachNeighbor, isKnownMine, isRevealed, keyX, keyY, numberOf, type SaveData } from '@mine/core';
 import { DemoPlayer } from './demo';
 import { isTouchDevice, onTouchDeviceChange } from './device';
 import { fmt } from './format';
@@ -10,7 +10,7 @@ import { Camera } from './render/camera';
 import { CELL } from './render/textures';
 import { loadSettings, saveSettings, writeSave, type Settings } from './storage';
 import { PALETTES, applyTheme, onSystemThemeChange, resolveTheme } from './theme';
-import { RepairBubble } from './ui/bubble';
+import { LockedBubble, RepairBubble } from './ui/bubble';
 import { Hud, type PanelName } from './ui/hud';
 import { Panels } from './ui/panels';
 import { StartHint, TITLE_LEAVE_MS, TitleScreen } from './ui/title';
@@ -35,6 +35,7 @@ export class App {
   private hud!: Hud;
   private panels!: Panels;
   private bubble!: RepairBubble;
+  private lockedBubble!: LockedBubble;
   /** The board click of this gesture only dismissed a modal (the repair bubble): it does nothing else. */
   private swallowPrimary = false;
   /** The next DOM click only dismissed a modal: it is stopped before it reaches a button. */
@@ -72,7 +73,7 @@ export class App {
   }
 
   private newGame(seed = (Date.now() % 1_000_000) + 1): Game {
-    return new Game({ seed, resolve: { interventionMode: this.settings.interventionMode } } as never);
+    return new Game({ seed, } as never);
   }
 
   async start(): Promise<void> {
@@ -101,6 +102,7 @@ export class App {
       settingsChanged: (s) => this.applySettings(s),
     });
     this.bubble = new RepairBubble(this.appEl, (x, y) => this.repairBase(x, y));
+    this.lockedBubble = new LockedBubble(this.appEl);
     document.addEventListener('pointerdown', (e) => this.onDocPointerDown(e), true);
     document.addEventListener(
       'click',
@@ -158,6 +160,7 @@ export class App {
       this.view.update(this.cam);
       this.hud.update(this.game);
       this.bubble.update(this.game, this.cam);
+      this.lockedBubble.update(this.game, this.cam);
       if (this.dirty && performance.now() - this.lastSave > 15000) void this.save(false);
       this.panelTimer += dt;
       if (this.panels.current === 'base' && this.panelTimer > 1) {
@@ -327,6 +330,7 @@ export class App {
     this.centerOnStart();
     this.dirty = true;
     this.bubble.hide();
+    this.lockedBubble.hide();
     this.refreshPanel();
     this.syncHint();
   }
@@ -365,7 +369,7 @@ export class App {
     this.view.setSelectedBase(null);
     const s = this.game.cellState(c.x, c.y);
     if (isRevealed(s)) return this.chordAt(c);
-    if (this.lockedToast(c)) return;
+    if (this.lockedNotice(c)) return;
     // Touch devices never open a tile by tapping it (tiles open through chords;
     // only the first tap, placing the main base, opens): a tap cycles the mark
     // like a right-click.
@@ -394,6 +398,7 @@ export class App {
    * neighbour; the closed ones it could open (not fogged or locked) that stay closed look pressed.
    */
   private chordAt(c: { x: number; y: number }): void {
+    this.chordLocked(c);
     this.view.rippleFrom = cellKey(c.x, c.y);
     try {
       if (this.game.chord(c.x, c.y).full) this.poolFull();
@@ -410,18 +415,34 @@ export class App {
     if (keys.length) this.view.press(keys);
   }
 
-  /** A closed, visible cell of a tier not learned yet: say which technology it needs. */
-  private lockedToast(c: { x: number; y: number }): boolean {
+  /** A closed, visible cell of a tier not learned yet: a bubble over it says the mining technology needs upgrading. */
+  private lockedNotice(c: { x: number; y: number }): boolean {
     const s = this.game.cellState(c.x, c.y);
     if ((s !== CellState.Unknown && s !== CellState.Flag) || this.game.fogged(c.x, c.y) || !this.game.locked(c.x, c.y)) return false;
-    this.toasts.show(t('toast.locked', { t: this.game.tierAt(c.x, c.y), l: this.game.tierAt(c.x, c.y) - 1 }), 'bad');
+    this.lockedBubble.show(cellKey(c.x, c.y));
     return true;
+  }
+
+  /**
+   * A chord that would open locked neighbours (its flags and known mines match
+   * the number) puts the locked-tile bubble over the first of them.
+   */
+  private chordLocked(c: { x: number; y: number }): void {
+    const n = numberOf(this.game.cellState(c.x, c.y));
+    let marked = 0;
+    let locked: number | null = null;
+    forEachNeighbor(c.x, c.y, (x, y) => {
+      const s = this.game.cellState(x, y);
+      if (s === CellState.Flag || isKnownMine(s)) marked++;
+      else if (s === CellState.Unknown && locked === null && !this.game.fogged(x, y) && this.game.locked(x, y)) locked = cellKey(x, y);
+    });
+    if (marked === n && locked !== null) this.lockedBubble.show(locked);
   }
 
   private onSecondary(c: { x: number; y: number }): void {
     if (this.swallowPrimary) return void (this.swallowPrimary = false);
     const s = this.game.cellState(c.x, c.y);
-    if (this.lockedToast(c)) return;
+    if (this.lockedNotice(c)) return;
     if (isRevealed(s)) this.chordAt(c);
     // Unknown -> flag -> "?" -> Unknown.
     else this.game.cycleMark(c.x, c.y);
@@ -612,7 +633,6 @@ export class App {
     if (this.app) {
       this.app.renderer.background.color = pal.bg;
       this.view.setPalette(pal);
-      this.view.setDensityOverlay(s.showDensity);
     }
     setLang(resolveLang(s.lang));
     const touch = isTouchDevice();

@@ -26,7 +26,6 @@ const STRINGS = {
     'status.zoom': '줌',
     'status.density': '밀도',
     'status.tier': '티어',
-    'status.seed': '시드',
     'status.saved': '저장됨',
     'status.saving': '저장 중',
     'status.unsaved': '변경됨',
@@ -34,7 +33,7 @@ const STRINGS = {
     'toast.droneHit': '드론 #{id} 폭발 (기록 확인)',
     'toast.bought': '{name} 구매',
     'toast.noMoney': '크레딧 부족',
-    'toast.locked': '{t}티어 타일 · 주 거점 패널에서 채굴 기술을 {l}레벨로 올려야 합니다',
+    'bubble.locked': '채굴 기술을 업그레이드해야 합니다.',
     'toast.tech': '{t}티어 채굴 가능',
     'toast.saved': '저장됨',
     'toast.prestige': '청산 완료: 코어 +{gain}',
@@ -114,18 +113,12 @@ const STRINGS = {
     'settings.theme.light': '라이트',
     'settings.theme.dark': '다크',
     'settings.lang': '언어',
-    'settings.lang.auto': '시스템',
     'settings.input': '입력 방식',
     'settings.input.classic': '클래식 (좌클릭 열기 · 우클릭/길게 깃발 → ? → 해제)',
     'settings.input.toggle': '모드 토글 (버튼으로 열기/깃발 전환)',
     'settings.longPress': '길게 누르기 (ms)',
-    'settings.showDensity': '밀도 오버레이',
-    'settings.intervention': '구제 정책 (새 게임부터)',
-    'settings.intervention.STRICT': 'STRICT · 구제 없음',
-    'settings.intervention.FAIR': 'FAIR · 우회 불가능한 곳만',
-    'settings.intervention.FORGIVING': 'FORGIVING · 초반 3회 구제',
     'settings.newGame': '새 게임',
-    'settings.newGame.confirm': '현재 진행을 버리고 새 월드를 시작할까요? (코어는 유지)',
+    'settings.newGame.confirm': '현재 진행을 버리고 새 월드를 시작할까요?',
     'settings.save': '지금 저장',
     'settings.help': '조작: 드래그/휠로 이동·줌, 숫자 클릭으로 코드(chord), F 깃발 모드, U 주 거점, H 원점, Space 정산, Esc 닫기',
     'settings.help.touch': '조작: 드래그로 이동, 두 손가락으로 줌, 타일 탭으로 깃발 → ? → 해제, 숫자 탭으로 코드(chord)해 주변 열기',
@@ -156,7 +149,6 @@ const STRINGS = {
     'status.zoom': 'Zoom',
     'status.density': 'Density',
     'status.tier': 'Tier',
-    'status.seed': 'Seed',
     'status.saved': 'Saved',
     'status.saving': 'Saving',
     'status.unsaved': 'Modified',
@@ -164,7 +156,7 @@ const STRINGS = {
     'toast.droneHit': 'Drone #{id} exploded (see log)',
     'toast.bought': 'Bought {name}',
     'toast.noMoney': 'Not enough credits',
-    'toast.locked': 'Tier {t} tile · raise mining technology to level {l} in the main-base panel',
+    'bubble.locked': 'Upgrade the mining technology first.',
     'toast.tech': 'Tier {t} can now be mined',
     'toast.saved': 'Saved',
     'toast.prestige': 'Liquidated: +{gain} cores',
@@ -244,18 +236,12 @@ const STRINGS = {
     'settings.theme.light': 'Light',
     'settings.theme.dark': 'Dark',
     'settings.lang': 'Language',
-    'settings.lang.auto': 'System',
     'settings.input': 'Input',
     'settings.input.classic': 'Classic (left-click open · right-click/long-press flag → ? → clear)',
     'settings.input.toggle': 'Mode toggle (button switches open/flag)',
     'settings.longPress': 'Long press (ms)',
-    'settings.showDensity': 'Density overlay',
-    'settings.intervention': 'Rescue policy (new games)',
-    'settings.intervention.STRICT': 'STRICT · never',
-    'settings.intervention.FAIR': 'FAIR · only enclosed pockets',
-    'settings.intervention.FORGIVING': 'FORGIVING · first 3 rescued',
     'settings.newGame': 'New game',
-    'settings.newGame.confirm': 'Discard the current world and start a new one? (cores are kept)',
+    'settings.newGame.confirm': 'Discard the current world and start a new one?',
     'settings.save': 'Save now',
     'settings.help': 'Controls: drag/wheel to pan & zoom, click a number to chord, F flag mode, U main base, H home, Space cash out, Esc close',
     'settings.help.touch': 'Controls: drag to pan, two fingers to zoom, tap a tile for flag → ? → clear, tap a number to chord and open around it',
@@ -271,9 +257,7 @@ export type StringKey = keyof (typeof STRINGS)['en'];
 let current: Lang = 'en';
 
 export function resolveLang(setting: LangSetting): Lang {
-  if (setting !== 'auto') return setting;
-  const nav = typeof navigator !== 'undefined' ? navigator.language : 'en';
-  return nav.toLowerCase().startsWith('ko') ? 'ko' : 'en';
+  return setting;
 }
 
 export function setLang(l: Lang): void {

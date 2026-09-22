@@ -69,7 +69,7 @@ export class Panels {
         this.renderBase(game);
         break;
       case 'settings':
-        this.renderSettings(game, settings);
+        this.renderSettings(settings);
         break;
     }
     this.body.scrollTop = scroll;
@@ -130,15 +130,13 @@ export class Panels {
     return el('div', { class: 'row' }, left, right);
   }
 
-  private renderSettings(game: Game, s: Settings): void {
+  private renderSettings(s: Settings): void {
     const field = (label: string, control: HTMLElement) => el('div', { class: 'field' }, el('span', {}, label), control);
     const select = (value: string, options: Array<[string, string]>, onchange: (v: string) => void) => {
       const sel = el('select', { onchange: (e) => onchange((e.target as HTMLSelectElement).value) });
       for (const [v, label] of options) sel.append(el('option', { value: v, selected: v === value, text: label }));
       return sel;
     };
-    const check = (value: boolean, onchange: (v: boolean) => void) =>
-      el('input', { type: 'checkbox', checked: value, onchange: (e) => onchange((e.target as HTMLInputElement).checked) });
     const emit = () => this.h.settingsChanged(s);
     // Touch devices have one input: a tap marks (no input mode, no long press).
     const touch = isTouchDevice();
@@ -152,7 +150,7 @@ export class Panels {
       ),
       field(
         t('settings.lang'),
-        select(s.lang, [['auto', t('settings.lang.auto')], ['ko', '한국어'], ['en', 'English']], (v) => {
+        select(s.lang, [['ko', '한국어'], ['en', 'English']], (v) => {
           s.lang = v as Settings['lang'];
           emit();
         }),
@@ -178,28 +176,10 @@ export class Panels {
           },
         }),
       ),
-      field(
-        t('settings.showDensity'),
-        check(s.showDensity, (v) => {
-          s.showDensity = v;
-          emit();
-        }),
-      ),
-      field(
-        t('settings.intervention'),
-        select(
-          s.interventionMode,
-          [['FAIR', t('settings.intervention.FAIR')], ['FORGIVING', t('settings.intervention.FORGIVING')], ['STRICT', t('settings.intervention.STRICT')]],
-          (v) => {
-            s.interventionMode = v as Settings['interventionMode'];
-            emit();
-          },
-        ),
-      ),
       el(
         'div',
         { class: 'field' },
-        el('span', {}, `${t('status.seed')} ${game.cfg.seed}`),
+        el('span', {}),
         el('div', {}, el('button', { class: 'btn small', text: t('settings.save'), onclick: () => this.h.saveNow() }), ' ', el('button', { class: 'btn small danger', text: t('settings.newGame'), onclick: () => this.h.newGame() })),
       ),
       el('div', { class: 'help', text: t(touch ? 'settings.help.touch' : 'settings.help') }),

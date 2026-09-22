@@ -53,7 +53,7 @@ export async function clearSave(): Promise<void> {
 }
 
 export type InputMode = 'classic' | 'toggle';
-export type LangSetting = 'auto' | 'ko' | 'en';
+export type LangSetting = 'ko' | 'en';
 
 export interface Settings {
   theme: ThemeSetting;
@@ -61,18 +61,20 @@ export interface Settings {
   inputMode: InputMode;
   longPressMs: number;
   showProbabilities: boolean;
-  showDensity: boolean;
-  interventionMode: 'STRICT' | 'FAIR' | 'FORGIVING';
+}
+
+/** The default language: Korean only when the system language is Korean, English otherwise. */
+export function systemLang(): LangSetting {
+  const nav = typeof navigator !== 'undefined' ? navigator.language : 'en';
+  return nav.toLowerCase().startsWith('ko') ? 'ko' : 'en';
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'auto',
-  lang: 'auto',
+  lang: systemLang(),
   inputMode: 'classic',
   longPressMs: 450,
   showProbabilities: true,
-  showDensity: false,
-  interventionMode: 'FAIR',
 };
 
 const SETTINGS_KEY = 'mineworld.settings';
@@ -81,7 +83,10 @@ export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
-    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    const s = { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<Settings>) };
+    // Older settings could follow the system language ('auto'); that choice is gone.
+    if (s.lang !== 'ko' && s.lang !== 'en') s.lang = systemLang();
+    return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

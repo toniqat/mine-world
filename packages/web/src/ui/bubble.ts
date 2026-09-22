@@ -65,3 +65,45 @@ export class RepairBubble {
     );
   }
 }
+
+/** How long the locked-tile notice stays up. */
+const LOCKED_MS = 5000;
+
+/**
+ * Speech bubble over a locked tile (opened directly or through a chord of a
+ * number next to it) saying the mining technology must be upgraded first.
+ * Modeless: clicking (tapping) it or 5 s make it go away; it follows the tile
+ * as the camera moves and hides once the tile is no longer locked.
+ */
+export class LockedBubble {
+  key: number | null = null;
+  private box: HTMLElement | null = null;
+  private timer = 0;
+
+  constructor(private root: HTMLElement) {}
+
+  show(key: number): void {
+    this.hide();
+    this.key = key;
+    this.box = el('div', { class: 'bubble locked', text: t('bubble.locked'), onclick: () => this.hide() });
+    this.root.append(this.box);
+    this.timer = window.setTimeout(() => this.hide(), LOCKED_MS);
+  }
+
+  hide(): void {
+    window.clearTimeout(this.timer);
+    this.box?.remove();
+    this.box = null;
+    this.key = null;
+  }
+
+  /** Per frame: follow the tile on screen; hides once its tier is learned. */
+  update(game: Game, cam: Camera): void {
+    if (this.key === null || !this.box) return;
+    const x = keyX(this.key), y = keyY(this.key);
+    if (!game.locked(x, y)) return this.hide();
+    const p = cam.worldToScreen((x + 0.5) * CELL, (y + 0.15) * CELL);
+    this.box.style.left = `${Math.round(p.x)}px`;
+    this.box.style.top = `${Math.round(p.y)}px`;
+  }
+}
